@@ -1,0 +1,491 @@
+{% extends 'base.html' %}
+
+{% block title %}Reports & Analytics{% endblock %}
+
+{% block ptitle %}
+<i class="bi bi-bar-chart-fill me-2" style="color:var(--accent);"></i>Reports & Analytics
+{% endblock %}
+
+{% block content %}
+<div class="row g-4">
+<!-- ==================== CHART SECTION ==================== -->
+<div class="col-lg-8">
+  <div class="card h-100">
+    <div class="card-header bg-transparent border-0 pb-0">
+      <h6 class="mb-0" style="font-family:'Syne',sans-serif;font-weight:700;color:#ffffff;">
+        <i class="bi bi-graph-up-arrow me-2" style="color:var(--primary);"></i>
+        Last 30 Days — Attendance Trend
+      </h6>
+    </div>
+    <div class="card-body">
+      <canvas id="trendChart" height="200" style="max-height:280px; width:100%;"></canvas>
+    </div>
+  </div>
+</div>
+
+<!-- ==================== PIE CHART SECTION ==================== -->
+<div class="col-lg-4">
+  <div class="card h-100">
+    <div class="card-header bg-transparent border-0 pb-0">
+      <h6 class="mb-0" style="font-family:'Syne',sans-serif;font-weight:700;color:#ffffff;">
+        <i class="bi bi-pie-chart-fill me-2" style="color:var(--accent);"></i>
+        Today by {% if session.role=='faculty' %}Semester{% else %}Department{% endif %}
+      </h6>
+    </div>
+    <div class="card-body text-center">
+      {% if data.dept_today %}
+        <canvas id="pieChart" style="max-height:220px; width:100%;"></canvas>
+      {% else %}
+        <div class="text-center text-muted py-5">
+          <i class="bi bi-calendar-x" style="font-size:3rem;"></i>
+          <p class="mt-2 mb-0">No data for today</p>
+        </div>
+      {% endif %}
+    </div>
+  </div>
+</div>
+
+<!-- Card 1: Total Working Days -->
+<div class="col-md-3">
+<div class="card text-center summary-card card-working">
+  <div class="card-body py-3 text-white">
+    <i class="bi bi-calendar-week fs-2"></i>
+    <div class="summary-value mt-2">{{ data.total_working_days|default(52) }}</div>
+    <small>Total Working Days</small>
+  </div>
+</div>
+</div>
+
+<!-- Card 2: Total Students -->
+<div class="col-md-3">
+<div class="card text-center summary-card card-students">
+  <div class="card-body py-3 text-white">
+    <i class="bi bi-people-fill fs-2"></i>
+    <div class="summary-value mt-2">{{ data.total_students|default(data.top|length) }}</div>
+    <small>Total Students</small>
+  </div>
+</div>
+</div>
+
+<!-- Card 3: Total Presents -->
+<div class="col-md-3">
+<div class="card text-center summary-card card-present">
+  <div class="card-body py-3 text-white">
+    <i class="bi bi-check-circle-fill fs-2"></i>
+    <div class="summary-value mt-2">{{ data.total_present|default(data.top|sum(attribute='present_days')) }}</div>
+    <small>Total Presents</small>
+  </div>
+</div>
+</div>
+
+<!-- Card 4: Total Absents -->
+<div class="col-md-3">
+<div class="card text-center summary-card card-absent">
+  <div class="card-body py-3 text-white">
+    <i class="bi bi-x-circle-fill fs-2"></i>
+    <div class="summary-value mt-2">{{ data.total_absent|default(data.top|sum(attribute='absent_days')) }}</div>
+    <small>Total Absents</small>
+  </div>
+</div>
+</div>
+<!-- ==================== STUDENTS TABLE ==================== -->
+<div class="col-12">
+  <div class="card">
+    <div class="card-header bg-transparent border-0 d-flex justify-content-between align-items-center flex-wrap">
+      <h6 class="mb-0" style="font-family:'Syne',sans-serif;font-weight:700;color:#ffffff;">
+        <i class="bi bi-trophy-fill me-2" style="color:var(--warn);"></i>
+        Student Attendance Summary
+      </h6>
+      <div class="btn-group">
+        <a href="{{ url_for('download_csv') }}" class="btn btn-sm btn-outline-primary">
+          <i class="bi bi-download"></i> CSV
+        </a>
+        <button onclick="window.print()" class="btn btn-sm btn-outline-secondary">
+          <i class="bi bi-printer"></i> Print
+        </button>
+      </div>
+    </div>
+    <div class="card-body p-0">
+      <div class="table-responsive">
+        <table class="tbl report-table">
+          <thead>
+            <tr class="text-center">
+              <th style="width: 60px;">Rank</th>
+              <th style="width: 60px;">Photo</th>
+              <th class="text-start">Name</th>
+              <th>Roll No</th>
+              <th>Dept</th>
+              <th>Total</th>
+              <th>Present</th>
+              <th>Absent</th>
+              <th style="width: 150px;">%</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for s in data.top %}
+            <tr class="text-center">
+              <td>
+                {% if loop.index == 1 %}🥇
+                {% elif loop.index == 2 %}🥈
+                {% elif loop.index == 3 %}🥉
+                {% else %}<span class="badge bg-secondary">{{ loop.index }}</span>{% endif %}
+              </td>
+              <td>
+                {% if s.photo_path %}
+                  <img src="{{ url_for('static', filename=s.photo_path) }}" 
+                        alt="{{ s.name }}" 
+                        width="35" height="35" 
+                        class="rounded-circle object-fit-cover"
+                        style="object-fit: cover;">
+                {% else %}
+                  <div class="bg-secondary rounded-circle d-inline-flex align-items-center justify-content-center" 
+                        style="width:35px;height:35px;">
+                    <i class="bi bi-person-fill text-white small"></i>
+                  </div>
+                {% endif %}
+              </td>
+              <td class="text-start"><strong>{{ s.name }}</strong></td>
+              <td><code>{{ s.roll_no }}</code></td>
+              <td><span class="dept-badge">{{ s.dept }}</span></td>
+              <td><strong class="text-white">{{ s.total_days }}</strong></td>
+              <td class="present-text">{{ s.present_days }}</td>
+              <td class="absent-text">{{ s.absent_days }}</td>
+              <td>
+                <div class="d-flex align-items-center gap-2">
+                  <div class="progress flex-grow-1" style="height: 6px;">
+                    <div class="progress-bar {% if s.attendance_percent >= 75 %}bg-success{% elif s.attendance_percent >= 60 %}bg-warning{% else %}bg-danger{% endif %}" 
+                          style="width: {{ s.attendance_percent }}%;">
+                    </div>
+                  </div>
+                  <small class="fw-bold {% if s.attendance_percent >= 75 %}text-success{% elif s.attendance_percent >= 60 %}text-warning{% else %}text-danger{% endif %}" 
+                          style="min-width: 45px;">
+                    {{ s.attendance_percent }}%
+                  </small>
+                </div>
+              </td>
+            </tr>
+            {% else %}
+            <tr>
+              <td colspan="9" class="text-center text-muted py-5">
+                <i class="bi bi-inbox fs-1"></i>
+                <p class="mt-2 mb-0">No attendance data available</p>
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+</div>
+{% endblock %}
+
+{% block js %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script>
+(function() {
+  // ==================== BAR CHART ====================
+  const trendData = {{ data.trend|tojson }};
+  const trendCtx = document.getElementById('trendChart');
+  
+  if (trendCtx && trendData && trendData.length) {
+      if (window.trendChartInstance) {
+          window.trendChartInstance.destroy();
+      }
+      
+      window.trendChartInstance = new Chart(trendCtx, {
+          type: 'bar',
+          data: {
+              labels: trendData.map(r => {
+                  let d = new Date(r.day);
+                  return d.toLocaleDateString('en-US', {month:'short', day:'numeric'});
+              }),
+              datasets: [
+                  {
+                      label: 'Present',
+                      data: trendData.map(r => r.present || 0),
+                      backgroundColor: '#4ade80',
+                      borderColor: '#22c55e',
+                      borderWidth: 1,
+                      borderRadius: 6,
+                      barPercentage: 0.65,
+                      categoryPercentage: 0.8
+                  },
+                  {
+                      label: 'Absent',
+                      data: trendData.map(r => r.absent || 0),
+                      backgroundColor: '#f87171',
+                      borderColor: '#ef4444',
+                      borderWidth: 1,
+                      borderRadius: 6,
+                      barPercentage: 0.65,
+                      categoryPercentage: 0.8
+                  }
+              ]
+          },
+          options: {
+              responsive: true,
+              maintainAspectRatio: true,
+              interaction: {
+                  mode: 'index',
+                  intersect: false
+              },
+              plugins: {
+                  legend: {
+                      position: 'top',
+                      labels: {
+                          color: '#cbd5e1',
+                          font: { size: 11, weight: 'bold' },
+                          usePointStyle: true,
+                          boxWidth: 8
+                      }
+                  },
+                  tooltip: {
+                      backgroundColor: '#1e293b',
+                      titleColor: '#f1f5f9',
+                      bodyColor: '#cbd5e1',
+                      borderColor: '#334155',
+                      borderWidth: 1,
+                      callbacks: {
+                          label: function(context) {
+                              let label = context.dataset.label || '';
+                              let value = context.raw || 0;
+                              return `${label}: ${value} students`;
+                          }
+                      }
+                  }
+              },
+              scales: {
+                  x: {
+                      stacked: false,
+                      ticks: {
+                          color: '#94a3b8',
+                          font: { size: 10 },
+                          maxRotation: 45,
+                          minRotation: 45
+                      },
+                      grid: {
+                          color: 'rgba(148, 163, 184, 0.08)',
+                          display: false
+                      }
+                  },
+                  y: {
+                      stacked: false,
+                      beginAtZero: true,
+                      ticks: {
+                          color: '#94a3b8',
+                          font: { size: 10 },
+                          stepSize: 1,
+                          precision: 0
+                      },
+                      grid: {
+                          color: 'rgba(148, 163, 184, 0.08)'
+                      },
+                      title: {
+                          display: true,
+                          text: 'Number of Students',
+                          color: '#94a3b8',
+                          font: { size: 10 }
+                      }
+                  }
+              }
+          }
+      });
+  } else if (trendCtx) {
+      trendCtx.parentElement.innerHTML = `
+          <div class="text-center text-muted py-5">
+              <i class="bi bi-bar-chart-steps fs-1"></i>
+              <p class="mt-2 mb-0">No trend data available for last 30 days</p>
+          </div>
+      `;
+  }
+
+  // ==================== PIE CHART ====================
+  const pieData = {{ data.dept_today|tojson }};
+  const pieCtx = document.getElementById('pieChart');
+  
+  if (pieCtx && pieData && pieData.length) {
+      if (window.pieChartInstance) {
+          window.pieChartInstance.destroy();
+      }
+      
+      const colorPalette = ['#60a5fa', '#22d3ee', '#4ade80', '#fbbf24', '#f87171', '#c084fc', '#f472b6', '#2dd4bf'];
+      
+      window.pieChartInstance = new Chart(pieCtx, {
+          type: 'doughnut',
+          data: {
+              labels: pieData.map(r => r.dept || r.semester),
+              datasets: [{
+                  data: pieData.map(r => r.present || r.n || 0),
+                  backgroundColor: colorPalette.slice(0, pieData.length),
+                  borderColor: '#1e293b',
+                  borderWidth: 3,
+                  hoverOffset: 8
+              }]
+          },
+          options: {
+              responsive: true,
+              maintainAspectRatio: true,
+              cutout: '65%',
+              plugins: {
+                  legend: {
+                      position: 'bottom',
+                      labels: {
+                          color: '#94a3b8',
+                          font: { size: 10 },
+                          boxWidth: 10,
+                          padding: 8
+                      }
+                  },
+                  tooltip: {
+                      backgroundColor: '#1e293b',
+                      titleColor: '#f1f5f9',
+                      bodyColor: '#cbd5e1',
+                      callbacks: {
+                          label: function(context) {
+                              let label = context.label || '';
+                              let value = context.raw || 0;
+                              let total = context.dataset.data.reduce((a, b) => a + b, 0);
+                              let percent = total > 0 ? ((value / total) * 100).toFixed(1) : 0;
+                              return `${label}: ${value} (${percent}%)`;
+                          }
+                      }
+                  }
+              }
+          }
+      });
+  }
+})();
+</script>
+
+<style>
+.stat-card{
+  border:none;
+  border-radius:18px;
+  color:white;
+  overflow:hidden;
+  box-shadow:0 10px 25px rgba(0,0,0,.25);
+  transition:.3s;
+}
+.stat-card:hover{
+  transform:translateY(-4px);
+}
+
+/* Purple */
+.card-working{
+  background:linear-gradient(135deg,#6d28d9,#8b5cf6);
+}
+
+/* Blue */
+.card-students{
+  background:linear-gradient(135deg,#2563eb,#38bdf8);
+}
+
+/* Green */
+.card-present{
+  background:linear-gradient(135deg,#059669,#34d399);
+}
+
+/* Red */
+.card-absent{
+  background:linear-gradient(135deg,#dc2626,#fb7185);
+}
+.summary-card{
+  border-radius:20px;
+  border:1px solid rgba(255,255,255,.08);
+  transition:.3s;
+}
+
+.summary-card:hover{
+  transform:translateY(-3px);
+}
+
+.card-working{
+  background:rgba(59,130,246,.15);
+  border:1px solid rgba(59,130,246,.3);
+  color:#60a5fa;
+}
+
+.card-students{
+  background:rgba(168,85,247,.15);
+  border:1px solid rgba(168,85,247,.3);
+  color:#c084fc;
+}
+
+.card-present{
+  background:rgba(16,185,129,.15);
+  border:1px solid rgba(16,185,129,.3);
+  color:#10b981;
+}
+
+.card-absent{
+  background:rgba(239,68,68,.15);
+  border:1px solid rgba(239,68,68,.3);
+  color:#ef4444;
+}
+
+.summary-value{
+  font-size:2.2rem;
+  font-weight:700;
+  color:#fff;
+}
+/* ===== Reports Table Same as Attendance ===== */
+
+.report-table{
+    width:100%;
+    border-collapse:collapse;
+}
+
+.report-table thead tr{
+    background:rgba(255,255,255,.06);
+}
+
+.report-table th{
+    color:var(--muted);
+    font-size:.78rem;
+    text-transform:uppercase;
+    letter-spacing:.04em;
+    padding:14px 16px;
+    border-bottom:1px solid rgba(255,255,255,.08);
+}
+
+.report-table td{
+    padding:14px 16px;
+    border-bottom:1px solid rgba(255,255,255,.06);
+    color:#fff;
+}
+
+.report-table tbody tr:hover{
+    background:rgba(255,255,255,.03);
+}
+
+.report-table code{
+    background:rgba(59,130,246,.15);
+    color:#60a5fa;
+    padding:4px 10px;
+    border-radius:999px;
+    font-family:inherit;
+}
+
+.dept-badge{
+    background:rgba(59,130,246,.15);
+    color:#60a5fa;
+    border:1px solid rgba(59,130,246,.3);
+    padding:4px 10px;
+    border-radius:999px;
+    font-size:.75rem;
+    font-weight:600;
+}
+
+.present-text{
+    color:#10b981;
+    font-weight:700;
+}
+
+.absent-text{
+    color:#ef4444;
+    font-weight:700;
+}
+</style>
+{% endblock %}

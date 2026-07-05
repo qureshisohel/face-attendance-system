@@ -1,0 +1,160 @@
+{% extends 'base.html' %}
+{% block title %}Add Student{% endblock %}
+{% block ptitle %}<i class="bi bi-person-plus-fill me-2" style="color:var(--accent);"></i>Add Student (Admin){% endblock %}
+{% block content %}
+<form method="POST" id="aForm">
+<div class="row g-3">
+  <!-- Details -->
+  <div class="col-lg-5">
+    <div class="card">
+      <h6 class="mb-3" style="font-family:'Syne',sans-serif;font-weight:700;color:#fff;"><i class="bi bi-person-vcard me-2" style="color:var(--primary);"></i>Student Details</h6>
+      <div class="mb-2"><label class="fl">Full Name *</label><input type="text" name="name" class="fi" placeholder="e.g. Ravi Patel" required/></div>
+      <div class="mb-2">
+  <label class="fl">Roll Number *</label>
+  <input type="text" name="roll_no" id="roll_no" class="fi" placeholder="e.g. MCA2024001" required/>
+  <small id="rollError" style="color:var(--danger); display:none; font-size:0.7rem; margin-top:4px;"></small>
+</div>
+      <div class="mb-2"><label class="fl">Email *</label><input type="email" name="email" class="fi" placeholder="student@email.com" required/></div>
+      <div class="mb-2"><label class="fl">Phone *</label><input type="text" name="phone" class="fi" pattern="\d{10}" minlength="10" maxlength="10" title="Please enter exactly 10 digits" oninput="this.value = this.value.replace(/[^0-9]/g, '')" placeholder="10-digit" required/></div>
+      <div class="mb-2"><label class="fl">Password *</label><input type="password" name="password" class="fi" placeholder="Min 6 chars" required minlength="6"/></div>
+      <div class="mb-2">
+        <label class="fl">Department *</label>
+        <select name="dept" class="fi" id="deptSel" required>
+          <option value="">Select Department</option>
+          {% for d in depts %}<option value="{{ d.name }}" data-sems="{{ d.semesters }}">{{ d.name }} — {{ d.degree }}</option>{% endfor %}
+        </select>
+      </div>
+      <div class="mb-2">
+        <label class="fl">Semester *</label>
+        <div class="d-flex flex-wrap gap-2" id="semBtns">
+          <span style="color:var(--muted);font-size:.8rem;">Select department first</span>
+        </div>
+        <input type="hidden" name="semester" id="semVal" value="1"/>
+      </div>
+    </div>
+  </div>
+
+  <!-- Face Capture -->
+  <div class="col-lg-7">
+    <div class="card">
+      <h6 class="mb-3" style="font-family:'Syne',sans-serif;font-weight:700;color:#fff"><i class="bi bi-person-bounding-box me-2" style="color:var(--accent);"></i>Face Registration <small style="color:var(--muted);font-weight:400;">(capture 3–5 photos)</small></h6>
+      <div class="cam-box mb-3">
+        <video id="video" autoplay muted playsinline></video>
+        <canvas id="snapCanvas" style="display:none;"></canvas>
+        <div class="cam-ov" id="camOverlay">
+          <i class="bi bi-camera-video-off" style="font-size:2.2rem;opacity:.4;"></i>
+          <span style="font-size:.85rem;">Click "Start Camera"</span>
+        </div>
+        <div class="face-box" id="faceBox" style="display:none;"><span></span></div>
+        <div class="scan" id="scanLine" style="display:none;"></div>
+      </div>
+      <div class="d-flex gap-2 flex-wrap mb-2">
+        <button type="button" id="startBtn" class="btn btn-p sm"><i class="bi bi-camera-video-fill"></i> Start Camera</button>
+        <button type="button" id="snapBtn" class="btn btn-g sm" style="display:none;"><i class="bi bi-camera-fill"></i> Capture Photo</button>
+        <button type="button" id="stopBtn" class="btn btn-r sm" style="display:none;"><i class="bi bi-stop-fill"></i> Stop</button>
+        <button type="button" id="clearBtn" class="btn btn-s sm" style="display:none;" onclick="clearPhotos()"><i class="bi bi-trash3"></i> Clear All</button>
+      </div>
+      <div id="capStatus" style="font-size:.78rem;color:var(--muted);margin-bottom:6px;">0 photo(s) captured — need at least 1</div>
+      <div class="thumbs" id="thumbs"></div>
+      <div id="hiddenFaces"></div>
+    </div>
+  </div>
+</div>
+
+<div class="card mt-3 d-flex justify-content-between align-items-center flex-wrap gap-2">
+  <div style="color:var(--muted);font-size:.82rem;"><i class="bi bi-info-circle me-1"></i>More face photos = better recognition accuracy</div>
+  <div class="d-flex gap-2">
+    <a href="{{ url_for('admin_students') }}" class="btn btn-s sm"><i class="bi bi-x-lg"></i> Cancel</a>
+    <button type="submit" class="btn btn-p sm" id="subBtn" disabled><i class="bi bi-person-check-fill"></i> Register Student</button>
+  </div>
+</div>
+</form>
+{% endblock %}
+
+{% block js %}
+<script src="{{ url_for('static',filename='js/cam.js') }}"></script>
+<script>
+let cam = null, faces = [];
+
+// Dept → semesters
+document.getElementById('deptSel').addEventListener('change', function(){
+  const sems = parseInt(this.selectedOptions[0]?.dataset.sems || 6);
+  const wrap = document.getElementById('semBtns');
+  wrap.innerHTML = '';
+  for(let i=1;i<=sems;i++){
+    const b = document.createElement('button');
+    b.type='button'; b.className='btn '+(i===1?'btn-p':'btn-s')+' xs';
+    b.textContent = 'Sem '+i;
+    b.onclick = function(){
+      wrap.querySelectorAll('.btn').forEach(x=>x.className='btn btn-s xs');
+      this.className='btn btn-p xs';
+      document.getElementById('semVal').value = i;
+    };
+    wrap.appendChild(b);
+  }
+  document.getElementById('semVal').value=1;
+});
+
+// Camera
+document.getElementById('startBtn').addEventListener('click', async()=>{
+  cam = new FASCam({videoId:'video',canvasId:'snapCanvas',overlayId:'camOverlay',fboxId:'faceBox',scanId:'scanLine'});
+  if(await cam.start()){
+    document.getElementById('startBtn').style.display='none';
+    document.getElementById('snapBtn').style.display='';
+    document.getElementById('stopBtn').style.display='';
+  }
+});
+document.getElementById('stopBtn').addEventListener('click',()=>{
+  cam&&cam.stop(); cam=null;
+  document.getElementById('startBtn').style.display='';
+  document.getElementById('snapBtn').style.display='none';
+  document.getElementById('stopBtn').style.display='none';
+});
+document.getElementById('snapBtn').addEventListener('click',()=>{
+  if(!cam||!cam.isActive()) return;
+  const url = cam.capture();
+  if(!url) return;
+  faces.push(url);
+  const img=document.createElement('img'); img.src=url;
+  document.getElementById('thumbs').appendChild(img);
+  const inp=document.createElement('input'); inp.type='hidden'; inp.name='face_images[]'; inp.value=url;
+  document.getElementById('hiddenFaces').appendChild(inp);
+  const st=document.getElementById('capStatus');
+  st.textContent=`${faces.length} photo(s) captured`;
+  st.style.color=faces.length>=3?'#10b981':'var(--warn)';
+  document.getElementById('clearBtn').style.display='';
+  document.getElementById('subBtn').disabled=false;
+});
+// Real-time roll number duplicate check
+document.getElementById('roll_no')?.addEventListener('blur', function() {
+    let roll = this.value;
+    let subBtn = document.getElementById('subBtn');
+    let errorSpan = document.getElementById('rollError');
+    
+    if(roll.length > 0) {
+        fetch(`/api/check_roll?roll=${encodeURIComponent(roll)}`)
+            .then(res => res.json())
+            .then(data => {
+                if(data.exists) {
+                    errorSpan.textContent = '❌ This roll number already exists!';
+                    errorSpan.style.display = 'block';
+                    if(subBtn) subBtn.disabled = true;
+                } else {
+                    errorSpan.style.display = 'none';
+                    if(subBtn && faces.length > 0) subBtn.disabled = false;
+                }
+            })
+            .catch(err => console.error(err));
+    }
+});
+function clearPhotos(){
+  faces=[];
+  document.getElementById('thumbs').innerHTML='';
+  document.getElementById('hiddenFaces').innerHTML='';
+  document.getElementById('capStatus').textContent='0 photo(s) captured';
+  document.getElementById('capStatus').style.color='var(--muted)';
+  document.getElementById('subBtn').disabled=true;
+  document.getElementById('clearBtn').style.display='none';
+}
+</script>
+{% endblock %}

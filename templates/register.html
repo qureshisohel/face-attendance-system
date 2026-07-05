@@ -1,0 +1,316 @@
+{% extends 'base.html' %}
+{% block title %}Register{% endblock %}
+{% block auth %}
+<div class="auth-pg" style="align-items:flex-start;padding:16px;">
+  <div class="auth-box" style="max-width:620px;margin:0 auto;">
+    <div class="auth-ico"><i class="bi bi-person-plus-fill text-white"></i></div>
+    <h1 class="auth-h">New Registration</h1>
+    <p class="auth-s" id="authSub">Create account — Student</p>
+
+    {% with msgs=get_flashed_messages(with_categories=true) %}
+    {% if msgs %}
+    {% for cat,msg in msgs %}
+    <div class="alert alert-{{ cat }} py-2 mb-3" style="font-size:.82rem;border-radius:9px;">{{ msg }}</div>
+    {% endfor %}
+    {% endif %}
+    {% endwith %}
+
+    <!--
+    <div class="rtabs" id="rtabs">
+      <button type="button" class="rtab on" onclick="setRole(this,'student')"> 
+      <i class="bi bi-mortarboard-fill"></i>Student</button>  
+      <button type="button" class="rtab" onclick="setRole(this,'faculty')"><i
+          class="bi bi-person-workspace"></i>Faculty</button>
+    </div>
+-->
+    <form method="POST" id="regForm" onsubmit="return validateForm()">
+      <input type="hidden" name="role" id="roleInput" value="student" />
+      <div class="row g-2">
+
+        <div class="col-md-3" id="titleCol" style="display:none;">
+          <label class="fl">Title *</label>
+          <select name="title" id="titleInput" class="fi">
+            <option value="Prof.">Prof.</option>
+            <option value="Dr.">Dr.</option>
+            <option value="Mr.">Mr.</option>
+            <option value="Ms.">Ms.</option>
+          </select>
+        </div>
+
+        <div class="col-12" id="nameCol">
+          <label class="fl">Full Name *</label>
+          <input type="text" name="name" class="fi" placeholder="Enter full name" required />
+        </div>
+
+        <div class="col-md-6">
+          <label class="fl">Email Address *</label>
+          <input type="email" name="email" class="fi" placeholder="email@example.com" required />
+        </div>
+        <div class="col-md-6">
+          <label class="fl">Phone *</label>
+          <input type="text" name="phone" id="phoneInput" class="fi" pattern="\d{10}" minlength="10" maxlength="10"
+            title="Please enter exactly 10 digits" oninput="this.value = this.value.replace(/[^0-9]/g, '')"
+            placeholder="10-digit number" required />
+        </div>
+
+        <div class="col-md-6">
+          <label class="fl">Password *</label>
+          <div style="position:relative;">
+            <input type="password" name="password" id="pw" class="fi" placeholder="Min 6 characters" required
+              minlength="6" />
+            <button type="button" onclick="togglePw()"
+              style="position:absolute;right:11px;top:50%;transform:translateY(-50%);background:none;border:none;color:var(--muted);cursor:pointer;font-size:1rem;">
+              <i class="bi bi-eye" id="eyeI"></i>
+            </button>
+          </div>
+        </div>
+
+        <div class="col-md-6" id="rollCol">
+          <label class="fl" id="idLabel">Roll Number *</label>
+          <input type="text" name="roll_no" id="rollInput" class="fi" placeholder="e.g. MCA2024001" required />
+          <input type="hidden" name="employee_id" id="empInput" disabled />
+        </div>
+
+        <div class="col-md-6 dept-col">
+          <label class="fl">Department *</label>
+          <select name="dept" class="fi" required>
+            <option value="">Select Department</option>
+            {% for d in depts %}<option value="{{ d.name }}">{{ d.name }} ({{ d.degree }})</option>{% endfor %}
+          </select>
+        </div>
+
+        <div class="col-12" id="semWrap">
+          <label class="fl">Semester *</label>
+          <div class="d-flex flex-wrap gap-2" id="semBtns">
+            <div style="color:var(--muted);font-size:.82rem;">Select department first</div>
+          </div>
+          <!-- <input type="hidden" name="semester" id="semInput" value="1" /> -->
+          <input type="hidden" name="semester" id="semInput" value="" />
+        </div>
+
+        <!-- Face Capture -->
+        <div class="col-12 mt-3" id="faceDiv">
+          <label class="fl"><i class="bi bi-person-bounding-box me-1"></i>
+            Face Registration * <small style="color:var(--muted);font-weight:400;">(capture 3 photos)</small>
+          </label>
+          <div class="cam-box mb-2">
+            <video id="video" autoplay muted playsinline></video>
+            <canvas id="snapCanvas" style="display:none;"></canvas>
+            <div class="cam-ov" id="camOverlay">
+              <i class="bi bi-camera-video-off" style="font-size:2.2rem;opacity:.5;"></i>
+              <span style="font-size:.85rem;">Click "Start Camera" below</span>
+            </div>
+            <div class="face-box" id="faceBox" style="display:none;"><span></span></div>
+            <div class="scan" id="scanLine" style="display:none;"></div>
+          </div>
+          <div class="d-flex gap-2 flex-wrap mb-2">
+            <button type="button" id="startBtn" class="btn btn-p sm"><i class="bi bi-camera-video-fill"></i> Start
+              Camera</button>
+            <button type="button" id="snapBtn" class="btn btn-g sm" style="display:none;"><i
+                class="bi bi-camera-fill"></i> Capture</button>
+            <button type="button" id="stopBtn" class="btn btn-r sm" style="display:none;"><i
+                class="bi bi-stop-fill"></i> Stop</button>
+          </div>
+          <div id="capStatus" style="font-size:.78rem;color:var(--muted);">0 photo(s) captured</div>
+          <div class="thumbs" id="thumbs"></div>
+          <div id="hiddenFaces"></div>
+          <input type="hidden" name="profile_image" id="profImgInput" />
+        </div>
+      </div>
+
+      <div id="formError" class="alert alert-danger py-2 mt-3" style="display:none;font-size:.82rem;border-radius:9px;">
+      </div>
+
+      <button type="submit" class="btn btn-p w-100 justify-content-center mt-4" id="subBtn"
+        style="padding:11px;font-size:.95rem;">
+        <i class="bi bi-person-check-fill"></i> Create Account
+      </button>
+    </form>
+
+    <div class="text-center mt-3" style="font-size:.8rem;color:var(--muted);">
+      Already registered? <a href="{{ url_for('login') }}" style="color:var(--accent);">Login →</a>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block js %}
+<script src="{{ url_for('static',filename='js/cam.js') }}"></script>
+<script>
+  const deptsData = {{ depts | tojson | safe }};
+  const deptSems = {};
+
+  deptsData.forEach(d => {
+    deptSems[d.name] = d.semesters;
+  });
+  function setRole(btn, role) {
+    document.querySelectorAll('.rtab').forEach(b => b.classList.remove('on'));
+    btn.classList.add('on');
+
+    document.getElementById('roleInput').value = role;
+    document.getElementById('authSub').textContent =
+      'Create account — ' + (role === 'student' ? 'Student' : 'Faculty');
+
+    const titleCol = document.getElementById('titleCol');
+    const nameCol = document.getElementById('nameCol');
+    const semWrap = document.getElementById('semWrap');
+    const rollInput = document.getElementById('rollInput');
+    const empInput = document.getElementById('empInput');
+    const idLabel = document.getElementById('idLabel');
+
+    if (role === 'faculty') {
+
+      titleCol.style.display = 'block';
+      nameCol.className = 'col-md-9';
+      semWrap.style.display = 'none';
+      idLabel.textContent = 'Employee ID *';
+
+      document.getElementById('semInput').value = '';
+
+      rollInput.name = '';
+      rollInput.disabled = true;
+      rollInput.required = false;
+      rollInput.style.display = 'none';
+
+      empInput.name = 'employee_id';
+      empInput.disabled = false;
+      empInput.type = 'text';
+      empInput.className = 'fi';
+      empInput.placeholder = 'e.g. FAC001';
+      empInput.required = true;
+      empInput.style.display = 'block';
+
+    } else {
+
+      titleCol.style.display = 'none';
+      nameCol.className = 'col-12';
+      semWrap.style.display = 'block';
+      idLabel.textContent = 'Roll Number *';
+
+      if (!document.getElementById('semInput').value) {
+        document.getElementById('semInput').value = 1;
+      }
+
+      empInput.name = '';
+      empInput.disabled = true;
+      empInput.required = false;
+      empInput.style.display = 'none';
+
+      rollInput.name = 'roll_no';
+      rollInput.disabled = false;
+      rollInput.required = true;
+      rollInput.style.display = 'block';
+    }
+  }
+
+  function togglePw() {
+    const pw = document.getElementById('pw'), ic = document.getElementById('eyeI');
+    pw.type = pw.type === 'password' ? 'text' : 'password';
+    ic.className = 'bi bi-eye' + (pw.type === 'text' ? '-slash' : '');
+  }
+
+  // Semester buttons from dept selection
+  document.querySelector('select[name="dept"]').addEventListener('change', function () {
+    const dept = this.value;
+    const sems = deptSems[dept] || 6;
+    const wrap = document.getElementById('semBtns');
+    wrap.innerHTML = '';
+    for (let i = 1; i <= sems; i++) {
+      const btn = document.createElement('button');
+      btn.type = 'button'; btn.className = 'btn btn-s sm'; btn.textContent = 'Sem ' + i;
+      btn.onclick = function () {
+        document.querySelectorAll('#semBtns .btn').forEach(b => b.className = 'btn btn-s sm');
+        this.className = 'btn btn-p sm';
+        document.getElementById('semInput').value = i;
+      };
+      if (i === 1) { btn.className = 'btn btn-p sm'; document.getElementById('semInput').value = 1; }
+      wrap.appendChild(btn);
+    }
+  });
+
+  // Face camera
+  let cam = null, capturedFaces = [];
+  document.getElementById('startBtn').addEventListener('click', async () => {
+    cam = new FASCam({ videoId: 'video', canvasId: 'snapCanvas', overlayId: 'camOverlay', fboxId: 'faceBox', scanId: 'scanLine' });
+    if (await cam.start()) {
+      document.getElementById('startBtn').style.display = 'none';
+      document.getElementById('snapBtn').style.display = '';
+      document.getElementById('stopBtn').style.display = '';
+    }
+  });
+  document.getElementById('stopBtn').addEventListener('click', () => {
+    cam && cam.stop();
+    document.getElementById('startBtn').style.display = '';
+    document.getElementById('snapBtn').style.display = 'none';
+    document.getElementById('stopBtn').style.display = 'none';
+  });
+  document.getElementById('snapBtn').addEventListener('click', () => {
+
+    // Maximum 3 photos
+    if (capturedFaces.length >= 3) {
+      alert('Maximum 3 photos allowed');
+      return;
+    }
+
+    if (!cam || !cam.isActive()) return;
+
+    const url = cam.capture();
+    if (!url) return;
+    capturedFaces.push(url);
+
+    const img = document.createElement('img');
+    img.src = url;
+    document.getElementById('thumbs').appendChild(img);
+
+    const inp = document.createElement('input'); inp.type = 'hidden'; inp.name = 'face_images[]'; inp.value = url;
+    document.getElementById('hiddenFaces').appendChild(inp);
+
+    // Also use the first face image as profile image for faculty
+    if (capturedFaces.length === 1) {
+      document.getElementById('profImgInput').value = url;
+    }
+
+    const st = document.getElementById('capStatus');
+    st.textContent = `${capturedFaces.length} photo(s) captured`;
+    st.style.color = capturedFaces.length >= 3 ? '#10b981' : 'var(--muted)';
+  });
+
+  // Form Validation before submit
+  function validateForm() {
+    const errDiv = document.getElementById('formError');
+    errDiv.style.display = 'none';
+    errDiv.innerHTML = '';
+
+    if (capturedFaces.length < 3) {
+      errDiv.innerHTML = '<i class="bi bi-exclamation-triangle-fill me-1"></i>Please capture at least 3 face photos.';
+      errDiv.style.display = 'block';
+      return false;
+    }
+
+    const phoneVal = document.getElementById('phoneInput').value;
+    if (phoneVal.length !== 10) {
+      errDiv.innerHTML = '<i class="bi bi-exclamation-triangle-fill me-1"></i>Phone number must be exactly 10 digits.';
+      errDiv.style.display = 'block';
+      return false;
+    }
+
+    const role = document.getElementById('roleInput').value;
+    if (
+      role === 'student' &&
+      document.getElementById('semInput').value === ''
+    ) {
+      errDiv.innerHTML = '<i class="bi bi-exclamation-triangle-fill me-1"></i>Please select a semester.';
+      errDiv.style.display = 'block';
+      return false;
+    }
+
+    // Disable submit button to prevent double submission
+    const btn = document.getElementById('subBtn');
+    btn.innerHTML = '<i class="bi bi-hourglass-split"></i> Processing...';
+    btn.style.opacity = '0.7';
+    btn.disabled = true;
+
+    return true;
+  }
+</script>
+{% endblock %}

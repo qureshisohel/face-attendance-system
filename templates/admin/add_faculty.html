@@ -1,0 +1,130 @@
+{% extends 'base.html' %}
+{% block title %}Add Faculty{% endblock %}
+{% block ptitle %}<i class="bi bi-person-plus-fill me-2" style="color:var(--accent);"></i>Add Faculty (Admin){% endblock %}
+{% block content %}
+<form method="POST">
+<div class="row g-3">
+  <div class="col-lg-6">
+    <div class="card">
+      <h6 class="mb-3" style="font-family:'Syne',sans-serif;font-weight:700;color:#ffffff;"><i class="bi bi-person-workspace me-2" style="color:var(--primary);"></i>Faculty Details</h6>
+      <div class="mb-2">
+        <label class="fl">Title *</label>
+        <select name="title" class="fi" required>
+          <option value="Prof.">Prof. (Professor)</option>
+          <option value="Dr.">Dr. (Doctor)</option>
+          <option value="Mr.">Mr. (Sir)</option>
+          <option value="Mrs.">Mrs. (Madam)</option>
+          <option value="Ms.">Ms. (Madam)</option>
+        </select>
+      </div>
+      <div class="mb-2"><label class="fl">Full Name *</label><input type="text" name="name" class="fi" placeholder="e.g. Meena Joshi" required/></div>
+      <div class="mb-2"><label class="fl">Employee ID *</label><input type="text" name="employee_id" class="fi" placeholder="e.g. FAC001" required/></div>
+      <div class="mb-2"><label class="fl">Email *</label><input type="email" name="email" class="fi" placeholder="faculty@college.edu" required/></div>
+      <div class="mb-2"><label class="fl">Phone *</label><input type="text" name="phone" class="fi" pattern="\d{10}" minlength="10" maxlength="10" title="Please enter exactly 10 digits" oninput="this.value = this.value.replace(/[^0-9]/g, '')" placeholder="10-digit" required/></div>
+      <div class="mb-2"><label class="fl">Password *</label><input type="password" name="password" class="fi" placeholder="Min 6 chars" required minlength="6"/></div>
+      <div class="mb-2">
+        <label class="fl">Department *</label>
+        <select name="dept" class="fi" required>
+          <option value="">Select Department</option>
+          {% for d in depts %}<option value="{{ d.name }}">{{ d.name }}</option>{% endfor %}
+        </select>
+      </div>
+    </div>
+  </div>
+
+  <div class="col-lg-6">
+    <div class="card">
+      <h6 class="mb-3" style="font-family:'Syne',sans-serif;font-weight:700;color:#ffffff;"><i class="bi bi-camera-fill me-2" style="color:var(--accent);"></i>Profile Photo <small style="color:var(--muted);font-weight:400;">(optional)</small></h6>
+      <div class="d-flex align-items-center gap-3 mb-3">
+        <div id="profPreview" style="width:72px;height:72px;border-radius:50%;background:var(--card2);border:2px dashed var(--border);display:flex;align-items:center;justify-content:center;overflow:hidden;flex-shrink:0;">
+          <i class="bi bi-person-fill" style="font-size:2rem;color:var(--muted);"></i>
+        </div>
+        <div>
+          <button type="button" onclick="openProfCam()" class="btn btn-s sm"><i class="bi bi-camera-fill"></i> Capture from Camera</button>
+          <div style="font-size:.72rem;color:var(--muted);margin-top:4px;">Or leave blank for default avatar</div>
+        </div>
+      </div>
+      <input type="hidden" name="profile_image" id="profImgInput"/>
+
+      <!-- Faculty Face for recognition (optional) -->
+      <h6 class="mb-2 mt-3" style="font-family:'Syne',sans-serif;font-weight:700;font-size:.9rem;color:#ffffff;"><i class="bi bi-person-bounding-box me-2" style="color:var(--warn);"></i>Face Data <small style="color:var(--muted);font-weight:400;">(optional)</small></h6>
+      <div class="cam-box mb-2" style="max-height:220px;">
+        <video id="video" autoplay muted playsinline></video>
+        <canvas id="snapCanvas" style="display:none;"></canvas>
+        <div class="cam-ov" id="camOverlay">
+          <i class="bi bi-camera-video-off" style="font-size:1.8rem;opacity:.4;"></i>
+          <span style="font-size:.8rem;">Optional: capture for attendance</span>
+        </div>
+        <div class="face-box" id="faceBox" style="display:none;"><span></span></div>
+        <div class="scan" id="scanLine" style="display:none;"></div>
+      </div>
+      <div class="d-flex gap-2 flex-wrap mb-1">
+        <button type="button" id="startBtn" class="btn btn-s sm"><i class="bi bi-camera-video-fill"></i> Start</button>
+        <button type="button" id="snapBtn" class="btn btn-g sm" style="display:none;"><i class="bi bi-camera-fill"></i> Capture</button>
+        <button type="button" id="stopBtn" class="btn btn-r sm" style="display:none;"><i class="bi bi-stop-fill"></i> Stop</button>
+      </div>
+      <div id="capStatus" style="font-size:.74rem;color:var(--muted);">0 face photo(s)</div>
+      <div class="thumbs" id="thumbs"></div>
+      <div id="hiddenFaces"></div>
+    </div>
+  </div>
+</div>
+
+<div class="card mt-3 d-flex justify-content-between align-items-center flex-wrap gap-2">
+  <div style="color:var(--muted);font-size:.82rem;"><i class="bi bi-info-circle me-1"></i>Faculty face data can optionally be registered</div>
+  <div class="d-flex gap-2">
+    <a href="{{ url_for('admin_faculty') }}" class="btn btn-s sm"><i class="bi bi-x-lg"></i> Cancel</a>
+    <button type="submit" class="btn btn-p sm"><i class="bi bi-person-check-fill"></i> Add Faculty</button>
+  </div>
+</div>
+</form>
+
+<!-- Profile photo modal -->
+<div id="profModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.82);z-index:9999;align-items:center;justify-content:center;padding:14px;">
+  <div style="background:var(--card);border-radius:15px;padding:17px;width:100%;max-width:360px;border:1px solid var(--border);">
+    <div class="d-flex justify-content-between mb-2"><strong style="font-size:.9rem;">Profile Photo</strong>
+    <button onclick="closeProfCam()" style="background:none;border:none;color:var(--muted);font-size:1.2rem;cursor:pointer;"><i class="bi bi-x"></i></button></div>
+    <div class="cam-box mb-2"><video id="profVideo" autoplay muted playsinline></video><div class="cam-ov" id="profOv"><i class="bi bi-camera-video-off" style="font-size:2rem;opacity:.5;"></i></div></div>
+    <canvas id="profCanvas" style="display:none;"></canvas>
+    <button onclick="snapProf()" class="btn btn-p w-100 justify-content-center"><i class="bi bi-camera-fill"></i> Take Photo</button>
+  </div>
+</div>
+{% endblock %}
+
+{% block js %}
+<script src="{{ url_for('static',filename='js/cam.js') }}"></script>
+<script>
+let cam=null, profStream=null, faces=[];
+
+// Face camera
+document.getElementById('startBtn').addEventListener('click',async()=>{
+  cam=new FASCam({videoId:'video',canvasId:'snapCanvas',overlayId:'camOverlay',fboxId:'faceBox',scanId:'scanLine'});
+  if(await cam.start()){document.getElementById('startBtn').style.display='none';document.getElementById('snapBtn').style.display='';document.getElementById('stopBtn').style.display='';}
+});
+document.getElementById('stopBtn').addEventListener('click',()=>{cam&&cam.stop();cam=null;document.getElementById('startBtn').style.display='';document.getElementById('snapBtn').style.display='none';document.getElementById('stopBtn').style.display='none';});
+document.getElementById('snapBtn').addEventListener('click',()=>{
+  if(!cam||!cam.isActive()) return;
+  const url=cam.capture(); if(!url) return;
+  faces.push(url);
+  const img=document.createElement('img'); img.src=url; document.getElementById('thumbs').appendChild(img);
+  const inp=document.createElement('input'); inp.type='hidden'; inp.name='face_images[]'; inp.value=url; document.getElementById('hiddenFaces').appendChild(inp);
+  document.getElementById('capStatus').textContent=faces.length+' face photo(s) captured';
+  document.getElementById('capStatus').style.color=faces.length>=3?'#10b981':'var(--warn)';
+});
+
+// Profile photo
+function openProfCam(){
+  document.getElementById('profModal').style.display='flex';
+  navigator.mediaDevices.getUserMedia({video:{facingMode:'user'},audio:false}).then(s=>{profStream=s;document.getElementById('profVideo').srcObject=s;document.getElementById('profOv').style.display='none';}).catch(e=>alert('Camera: '+e.message));
+}
+function closeProfCam(){if(profStream){profStream.getTracks().forEach(t=>t.stop());profStream=null;}document.getElementById('profModal').style.display='none';}
+function snapProf(){
+  const v=document.getElementById('profVideo'),c=document.getElementById('profCanvas');
+  c.width=v.videoWidth||640;c.height=v.videoHeight||480;c.getContext('2d').drawImage(v,0,0);
+  const url=c.toDataURL('image/jpeg',.88);
+  document.getElementById('profImgInput').value=url;
+  document.getElementById('profPreview').innerHTML=`<img src="${url}" style="width:100%;height:100%;object-fit:cover;border-radius:50%;"/>`;
+  closeProfCam();
+}
+</script>
+{% endblock %}

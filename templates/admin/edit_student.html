@@ -1,0 +1,132 @@
+{% extends 'base.html' %}
+{% block title %}Edit Student{% endblock %}
+{% block ptitle %}<i class="bi bi-pencil-fill me-2" style="color:var(--accent);"></i>Edit Student — {{ s.name }}{% endblock %}
+{% block content %}
+<form method="POST" id="eForm">
+<div class="row g-3">
+  <div class="col-lg-5">
+    <div class="card">
+      <h6 class="mb-3" style="font-family:'Syne',sans-serif;font-weight:700;"><i class="bi bi-person-vcard me-2" style="color:var(--primary);"></i>Student Details</h6>
+
+      <!-- Current photo -->
+      <div class="mb-3 text-center">
+        <div class="av-lg mx-auto mb-2">
+          {% if s.photo_path %}<img src="{{ url_for('static',filename=s.photo_path) }}" alt=""/>
+          {% else %}<i class="bi bi-person-fill"></i>{% endif %}
+        </div>
+        <span style="font-size:.75rem;color:var(--muted);">Current Photo</span>
+      </div>
+
+      <div class="mb-2"><label class="fl">Full Name *</label><input type="text" name="name" class="fi" value="{{ s.name }}" required/></div>
+      <div class="mb-2"><label class="fl">Email *</label><input type="email" name="email" class="fi" value="{{ s.email }}" required/></div>
+      <div class="mb-2"><label class="fl">Phone *</label><input type="text" name="phone" class="fi" pattern="\d{10}" minlength="10" maxlength="10" title="Please enter exactly 10 digits" oninput="this.value = this.value.replace(/[^0-9]/g, '')" value="{{ s.phone or '' }}" required/></div>
+      <div class="mb-2">
+        <label class="fl">Department *</label>
+        <select name="dept" class="fi" id="deptSel" required>
+          {% for d in depts %}
+          <option value="{{ d.name }}" data-sems="{{ d.semesters }}" {% if d.name==s.dept %}selected{% endif %}>{{ d.name }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="mb-2">
+        <label class="fl">Semester *</label>
+        <div class="d-flex flex-wrap gap-2" id="semBtns">
+          {% set max_sem = depts|selectattr('name','equalto',s.dept)|map(attribute='semesters')|first|default(8) %}
+          {% for i in range(1, max_sem+1) %}
+          <button type="button" class="btn {% if i==s.semester %}btn-p{% else %}btn-s{% endif %} xs" onclick="setSem(this,{{i}})">Sem {{i}}</button>
+          {% endfor %}
+        </div>
+        <input type="hidden" name="semester" id="semVal" value="{{ s.semester }}"/>
+      </div>
+      <div class="mb-2">
+        <label class="fl">New Password <small style="color:var(--muted);">(leave blank to keep current)</small></label>
+        <input type="password" name="new_password" class="fi" placeholder="Enter new password"/>
+      </div>
+      <div class="mb-2">
+        <label class="fl">Status</label>
+        <select name="is_active" class="fi">
+          <option value="1" {% if s.is_active %}selected{% endif %}>Active</option>
+          <option value="0" {% if not s.is_active %}selected{% endif %}>Inactive</option>
+        </select>
+      </div>
+      <div style="font-size:.75rem;color:var(--muted);margin-top:6px;">
+        <i class="bi bi-person-bounding-box me-1"></i>Face: {% if s.face_encoding %}<span style="color:#10b981;">✔ Enrolled</span>{% else %}<span style="color:#ef4444;">✗ Not enrolled</span>{% endif %}
+      </div>
+    </div>
+  </div>
+
+  <!-- Re-enroll Face (optional) -->
+  <div class="col-lg-7">
+    <div class="card">
+      <h6 class="mb-3" style="font-family:'Syne',sans-serif;font-weight:700;"><i class="bi bi-arrow-repeat me-2" style="color:var(--accent);"></i>Re-enroll Face <small style="color:var(--muted);font-weight:400;">(optional — only if replacing)</small></h6>
+      <div class="cam-box mb-3">
+        <video id="video" autoplay muted playsinline></video>
+        <canvas id="snapCanvas" style="display:none;"></canvas>
+        <div class="cam-ov" id="camOverlay">
+          <i class="bi bi-camera-video-off" style="font-size:2.2rem;opacity:.4;"></i>
+          <span style="font-size:.85rem;">Start camera to capture new face</span>
+        </div>
+        <div class="face-box" id="faceBox" style="display:none;"><span></span></div>
+        <div class="scan" id="scanLine" style="display:none;"></div>
+      </div>
+      <div class="d-flex gap-2 flex-wrap mb-2">
+        <button type="button" id="startBtn" class="btn btn-s sm"><i class="bi bi-camera-video-fill"></i> Start Camera</button>
+        <button type="button" id="snapBtn" class="btn btn-g sm" style="display:none;"><i class="bi bi-camera-fill"></i> Capture</button>
+        <button type="button" id="stopBtn" class="btn btn-r sm" style="display:none;"><i class="bi bi-stop-fill"></i> Stop</button>
+      </div>
+      <div id="capStatus" style="font-size:.78rem;color:var(--muted);">0 new photo(s) — leave empty to keep existing face data</div>
+      <div class="thumbs" id="thumbs"></div>
+      <div id="hiddenFaces"></div>
+    </div>
+  </div>
+</div>
+
+<div class="card mt-3 d-flex justify-content-between align-items-center flex-wrap gap-2">
+  <div style="color:var(--muted);font-size:.82rem;"><i class="bi bi-info-circle me-1"></i>Face re-enrollment only updates if new photos are captured</div>
+  <div class="d-flex gap-2">
+    <a href="{{ url_for('admin_students') }}" class="btn btn-s sm"><i class="bi bi-x-lg"></i> Cancel</a>
+    <button type="submit" class="btn btn-p sm"><i class="bi bi-check2-circle"></i> Save Changes</button>
+  </div>
+</div>
+</form>
+{% endblock %}
+
+{% block js %}
+<script src="{{ url_for('static',filename='js/cam.js') }}"></script>
+<script>
+let cam=null, faces=[];
+function setSem(btn,i){
+  document.querySelectorAll('#semBtns .btn').forEach(b=>b.className='btn btn-s xs');
+  btn.className='btn btn-p xs';
+  document.getElementById('semVal').value=i;
+}
+document.getElementById('deptSel').addEventListener('change',function(){
+  const sems=parseInt(this.selectedOptions[0]?.dataset.sems||8);
+  const wrap=document.getElementById('semBtns'); wrap.innerHTML='';
+  for(let i=1;i<=sems;i++){
+    const b=document.createElement('button'); b.type='button';
+    b.className='btn '+(i===1?'btn-p':'btn-s')+' xs'; b.textContent='Sem '+i;
+    b.onclick=function(){setSem(this,i);};
+    wrap.appendChild(b);
+  }
+  document.getElementById('semVal').value=1;
+});
+document.getElementById('startBtn').addEventListener('click',async()=>{
+  cam=new FASCam({videoId:'video',canvasId:'snapCanvas',overlayId:'camOverlay',fboxId:'faceBox',scanId:'scanLine'});
+  if(await cam.start()){
+    document.getElementById('startBtn').style.display='none';
+    document.getElementById('snapBtn').style.display='';
+    document.getElementById('stopBtn').style.display='';
+  }
+});
+document.getElementById('stopBtn').addEventListener('click',()=>{cam&&cam.stop();cam=null;document.getElementById('startBtn').style.display='';document.getElementById('snapBtn').style.display='none';document.getElementById('stopBtn').style.display='none';});
+document.getElementById('snapBtn').addEventListener('click',()=>{
+  if(!cam||!cam.isActive()) return;
+  const url=cam.capture(); if(!url) return;
+  faces.push(url);
+  const img=document.createElement('img'); img.src=url; document.getElementById('thumbs').appendChild(img);
+  const inp=document.createElement('input'); inp.type='hidden'; inp.name='face_images[]'; inp.value=url; document.getElementById('hiddenFaces').appendChild(inp);
+  const st=document.getElementById('capStatus'); st.textContent=`${faces.length} new photo(s) captured`; st.style.color=faces.length>=3?'#10b981':'var(--warn)';
+});
+</script>
+{% endblock %}

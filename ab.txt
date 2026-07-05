@@ -1,0 +1,3465 @@
+/////////////////////////////////////////app.py/////////////////////////////////////////////////////////////////////////
+"""
+Face Attendance System 
+Flask + OpenCV + face_recognition + MySQL
+"""
+from flask import (Flask, render_template, request, redirect, url_for,
+                   flash, jsonify, session, Response, send_file)
+import mysql.connector
+from mysql.connector import Error
+import cv2, numpy as np, face_recognition, base64, os, pickle, csv, io
+import random, string, hashlib
+from datetime import datetime, timedelta
+from functools import wraps
+import socket
+
+app = Flask(__name__)
+app.secret_key = 'FAS_SECRET_2024_change_in_prod'
+
+@app.context_processor
+def inject_globals():
+    from flask import request as req
+    return dict(req=req.endpoint or '', session=session)
+
+# ── DB Config ─────────────────────────────────────────────────────────────────
+DB = dict(host='localhost', user='root', password='6353849512', database='fas_db')
+
+def db():
+    try: return mysql.connector.connect(**DB)
+    except Error as e: print(f'DB Error: {e}'); return None
+
+def local_ip():
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(('8.8.8.8',80)); ip=s.getsockname()[0]; s.close(); return ip
+    except: return '127.0.0.1'
+
+# ── Auth helpers ──────────────────────────────────────────────────────────────
+def login_required(f):
+    @wraps(f)
+    def dec(*a,**kw):
+        if 'uid' not in session:
+            flash('Please login.','warning'); return redirect(url_for('login'))
+        return f(*a,**kw)
+    return dec
+
+def role_required(*roles):
+    def decorator(f):
+        @wraps(f)
+        def dec(*a,**kw):
+            if session.get('role') not in roles:
+                flash('Access denied.','danger'); return redirect(url_for('dashboard'))
+            return f(*a,**kw)
+        return dec
+    return decorator
+
+def save_photo(b64_str, folder, filename):
+    """Decode base64 image and save. Returns relative path."""
+    try:
+        data  = base64.b64decode(b64_str.split(',')[1])
+        arr   = np.frombuffer(data, np.uint8)
+        frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        path  = f"uploads/{folder}/{filename}"
+        os.makedirs(f"static/uploads/{folder}", exist_ok=True)
+        cv2.imwrite(f"static/{path}", frame)
+        return path
+    except Exception as e:
+        print(f"Photo save error: {e}"); return None
+
+def encode_faces(images_b64):
+    """Return averaged face encoding from list of base64 images, or None."""
+    encodings = []
+    for b64 in images_b64:
+        try:
+            data  = base64.b64decode(b64.split(',')[1])
+            arr   = np.frombuffer(data, np.uint8)
+            frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+            rgb   = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            locs  = face_recognition.face_locations(rgb, model='hog')
+            encs  = face_recognition.face_encodings(rgb, locs)
+            if encs: encodings.append(encs[0])
+        except Exception as e:
+            print(f"Encoding error: {e}")
+    if not encodings: return None
+    return pickle.dumps(np.mean(encodings, axis=0))
+
+def gen_token(n=32):
+    return ''.join(random.choices(string.ascii_letters+string.digits, k=n))
+
+def gen_otp():
+    return str(random.randint(100000,999999))
+
+def get_depts():
+    c = db()
+    if not c: return []
+    cur = c.cursor(dictionary=True)
+    cur.execute("SELECT * FROM departments ORDER BY name")
+    rows = cur.fetchall(); c.close(); return rows
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  AUTH ROUTES
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.route('/')
+def index():
+    return redirect(url_for('dashboard') if 'uid' in session else url_for('login'))
+
+# ── LOGIN ─────────────────────────────────────────────────────────────────────
+@app.route('/login', methods=['GET','POST'])
+def login():
+    if request.method == 'POST':
+        role     = request.form.get('role','student')
+        email    = request.form['email'].strip().lower()
+        password = request.form['password']
+
+        c = db()
+        if not c: flash('Database error.','danger'); return redirect(url_for('login'))
+        cur = c.cursor(dictionary=True)
+
+        user = None
+        if role == 'admin':
+            cur.execute("SELECT * FROM admin WHERE (username=%s OR email=%s) AND password=MD5(%s)",
+                        (email, email, password))
+            user = cur.fetchone()
+            if user: uid=user['id']; name=user['name']; photo=None; dept=None; sid=None
+        elif role == 'principal':
+            cur.execute("SELECT * FROM principal WHERE email=%s AND password=MD5(%s) AND is_active=1",(email,password))
+            user = cur.fetchone()
+            if user: uid=user['id']; name=user['name']; photo=user['photo_path']; dept=user['dept']; sid=user['employee_id']
+        elif role == 'faculty':
+            cur.execute("SELECT * FROM faculty WHERE email=%s AND password=MD5(%s) AND is_active=1",(email,password))
+            user = cur.fetchone()
+            if user: uid=user['id']; name=f"{user['title']} {user['name']}"; photo=user['photo_path']; dept=user['dept']; sid=user['employee_id']
+        elif role == 'student':
+            cur.execute("SELECT * FROM students WHERE email=%s AND password=MD5(%s) AND is_active=1",(email,password))
+            user = cur.fetchone()
+            if user: uid=user['id']; name=user['name']; photo=user['photo_path']; dept=user['dept']; sid=user['roll_no']
+
+        c.close()
+        if user:
+            session.update({'uid':uid,'role':role,'name':name,'photo':photo,'dept':dept,'sid':sid})
+            if role=='student': session['semester']=user['semester']
+            flash(f'Welcome, {name}!','success')
+            return redirect(url_for('dashboard'))
+        flash('Invalid credentials or account inactive.','danger')
+    return render_template('login.html')
+
+@app.route('/logout')
+def logout():
+    session.clear(); return redirect(url_for('login'))
+
+@app.route('/switch')
+def switch():
+    session.clear(); flash('Login with a different account.','info'); return redirect(url_for('login'))
+
+# ── REGISTER ──────────────────────────────────────────────────────────────────
+@app.route('/register', methods=['GET','POST'])
+def register():
+    depts = get_depts()
+    if request.method == 'POST':
+        role   = request.form.get('role','student')
+        name   = request.form['name'].strip()
+        email  = request.form['email'].strip().lower()
+        phone  = request.form.get('phone','')
+        passwd = request.form['password']
+        dept   = request.form.get('dept','')
+
+        c = db()
+        if not c: flash('DB error.','danger'); return redirect(url_for('register'))
+        cur = c.cursor()
+
+        try:
+            if role == 'principal':
+                emp_id = request.form.get('employee_id','').strip()
+                photo_b64 = request.form.get('profile_image','')
+                photo = save_photo(photo_b64, 'profiles', f"P_{emp_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}.jpg") if photo_b64 else None
+                cur.execute("INSERT INTO principal (name,employee_id,email,phone,password,dept,photo_path) VALUES(%s,%s,%s,%s,MD5(%s),%s,%s)",
+                            (name,emp_id,email,phone,passwd,dept,photo))
+
+            elif role == 'faculty':
+                title  = request.form.get('title','Prof.')
+                emp_id = request.form.get('employee_id','').strip()
+                photo_b64 = request.form.get('profile_image','')
+                photo = save_photo(photo_b64, 'profiles', f"F_{emp_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}.jpg") if photo_b64 else None
+                face_images = request.form.getlist('face_images[]')
+                face_blob = encode_faces(face_images) if face_images else None
+                cur.execute("INSERT INTO faculty (title,name,employee_id,email,phone,password,dept,photo_path,face_encoding) VALUES(%s,%s,%s,%s,%s,MD5(%s),%s,%s,%s)",
+                            (title,name,emp_id,email,phone,passwd,dept,photo,face_blob))
+
+            elif role == 'student':
+                roll_no  = request.form.get('roll_no','').strip()
+                semester = int(request.form.get('semester',1))
+                images   = request.form.getlist('face_images[]')
+                face_blob = encode_faces(images) if images else None
+                photo = None
+                if images:
+                    photo = save_photo(images[0], 'faces', f"S_{roll_no}_{datetime.now().strftime('%Y%m%d%H%M%S')}.jpg")
+                if not face_blob:
+                    flash('No face detected. Please capture face photos.','danger')
+                    c.close(); return redirect(url_for('register'))
+                cur.execute("INSERT INTO students (name,roll_no,email,phone,password,dept,semester,photo_path,face_encoding) VALUES(%s,%s,%s,%s,MD5(%s),%s,%s,%s,%s)",
+                            (name,roll_no,email,phone,passwd,dept,semester,photo,face_blob))
+
+            c.commit(); c.close()
+            flash('Registration successful! Please login.','success')
+            return redirect(url_for('login'))
+        except Error as e:
+            c.close()
+            if 'Duplicate' in str(e): flash('Email or ID already registered.','danger')
+            else: flash(f'Error: {e}','danger')
+
+    return render_template('register.html', depts=depts)
+
+# ── FORGOT PASSWORD ───────────────────────────────────────────────────────────
+@app.route('/forgot', methods=['GET','POST'])
+def forgot():
+    if request.method == 'POST':
+        email = request.form['email'].strip().lower()
+        role  = request.form['role']
+        c = db()
+        if not c: flash('DB error','danger'); return redirect(url_for('forgot'))
+        cur = c.cursor(dictionary=True)
+
+        found = False
+        tables = {'admin':'admin','principal':'principal','faculty':'faculty','student':'students'}
+        tbl = tables.get(role,'students')
+        cur.execute(f"SELECT id,email FROM `{tbl}` WHERE email=%s",(email,))
+        user = cur.fetchone()
+
+        if user:
+            token = gen_token()
+            expiry = datetime.now() + timedelta(hours=1)
+            cur2 = c.cursor()
+            cur2.execute("DELETE FROM password_resets WHERE email=%s AND role=%s",(email,role))
+            cur2.execute("INSERT INTO password_resets (email,role,token,expires_at) VALUES(%s,%s,%s,%s)",
+                         (email,role,token,expiry))
+            c.commit()
+            # In production, email the token. For demo, show it.
+            flash(f'Reset token (share via email in production): {token}','info')
+            found = True
+        c.close()
+        if not found: flash('Email not found for this role.','danger')
+    return render_template('forgot.html')
+
+@app.route('/reset/<token>', methods=['GET','POST'])
+def reset_password(token):
+    c = db()
+    if not c: flash('DB error','danger'); return redirect(url_for('login'))
+    cur = c.cursor(dictionary=True)
+    cur.execute("SELECT * FROM password_resets WHERE token=%s AND used=0 AND expires_at>NOW()",(token,))
+    rec = cur.fetchone()
+    if not rec: c.close(); flash('Invalid or expired token.','danger'); return redirect(url_for('login'))
+
+    if request.method == 'POST':
+        new_pw  = request.form['password']
+        confirm = request.form['confirm']
+        if new_pw != confirm: flash('Passwords do not match.','danger'); return render_template('reset.html',token=token)
+        tables = {'admin':'admin','principal':'principal','faculty':'faculty','student':'students'}
+        tbl = tables.get(rec['role'],'students')
+        cur2 = c.cursor()
+        cur2.execute(f"UPDATE `{tbl}` SET password=MD5(%s) WHERE email=%s",(new_pw,rec['email']))
+        cur2.execute("UPDATE password_resets SET used=1 WHERE token=%s",(token,))
+        c.commit(); c.close()
+        flash('Password reset successful! Please login.','success')
+        return redirect(url_for('login'))
+    c.close()
+    return render_template('reset.html', token=token, role=rec['role'], email=rec['email'])
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  DASHBOARD
+# ══════════════════════════════════════════════════════════════════════════════
+@app.route('/dashboard')
+@login_required
+def dashboard():
+    c = db(); role = session['role']; data={}
+    if c:
+        cur = c.cursor(dictionary=True)
+        if role in ('admin','principal'):
+            cur.execute("SELECT COUNT(*) AS n FROM students WHERE is_active=1"); data['students']=cur.fetchone()['n']
+            cur.execute("SELECT COUNT(*) AS n FROM faculty WHERE is_active=1");  data['faculty']=cur.fetchone()['n']
+            cur.execute("SELECT COUNT(*) AS n FROM principal WHERE is_active=1");data['principals']=cur.fetchone()['n']
+            cur.execute("SELECT COUNT(DISTINCT student_id) AS n FROM attendance WHERE DATE(timestamp)=CURDATE()"); data['today']=cur.fetchone()['n']
+            cur.execute("""SELECT s.name,s.roll_no,s.dept,s.semester,s.photo_path,a.timestamp,a.confidence
+                           FROM attendance a JOIN students s ON a.student_id=s.id
+                           ORDER BY a.timestamp DESC LIMIT 10""")
+            data['recent'] = cur.fetchall()
+        elif role == 'faculty':
+            cur.execute("SELECT COUNT(*) AS n FROM students WHERE dept=%s AND is_active=1",(session['dept'],)); data['students']=cur.fetchone()['n']
+            cur.execute("SELECT COUNT(DISTINCT a.student_id) AS n FROM attendance a JOIN students s ON a.student_id=s.id WHERE s.dept=%s AND DATE(a.timestamp)=CURDATE() AND a.faculty_id=%s",(session['dept'],session['uid'])); data['today']=cur.fetchone()['n']
+            cur.execute("""SELECT s.name,s.roll_no,s.photo_path,a.timestamp,a.confidence,a.subject
+                           FROM attendance a JOIN students s ON a.student_id=s.id
+                           WHERE a.faculty_id=%s ORDER BY a.timestamp DESC LIMIT 8""",(session['uid'],))
+            data['recent']=cur.fetchall()
+        elif role == 'student':
+            cur.execute("SELECT COUNT(*) AS n FROM attendance WHERE student_id=%s",(session['uid'],)); data['days']=cur.fetchone()['n']
+            cur.execute("SELECT COUNT(*) AS n FROM attendance WHERE student_id=%s AND DATE(timestamp)=CURDATE()",(session['uid'],)); data['today']=cur.fetchone()['n']
+            cur.execute("SELECT * FROM students WHERE id=%s",(session['uid'],)); data['profile']=cur.fetchone()
+            cur.execute("SELECT timestamp,status,confidence,subject FROM attendance WHERE student_id=%s ORDER BY timestamp DESC LIMIT 8",(session['uid'],)); data['recent']=cur.fetchall()
+        c.close()
+    return render_template('dashboard.html', data=data, lip=local_ip())
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  ADMIN CRUD
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── Admin: All Students ───────────────────────────────
+@app.route('/admin/students')
+@login_required
+@role_required('admin')
+def admin_students():
+    c=db(); rows=[]
+    if c:
+        cur=c.cursor(dictionary=True)
+        dept=request.args.get('dept',''); sem=request.args.get('sem','')
+        q="SELECT * FROM students WHERE 1=1"
+        params=[]
+        if dept: q+=" AND dept=%s"; params.append(dept)
+        if sem:  q+=" AND semester=%s"; params.append(sem)
+        q+=" ORDER BY dept,semester,name"
+        cur.execute(q,params); rows=cur.fetchall()
+        cur.execute("SELECT DISTINCT dept FROM students ORDER BY dept"); depts=[r['dept'] for r in cur.fetchall()]
+        c.close()
+    return render_template('admin/students.html', students=rows, depts=depts,
+                           sel_dept=dept, sel_sem=sem)
+
+@app.route('/admin/students/add', methods=['GET','POST'])
+@login_required
+@role_required('admin')
+def admin_add_student():
+    depts=get_depts()
+    if request.method=='POST':
+        name=request.form['name']; roll=request.form['roll_no']; email=request.form['email']
+        phone=request.form.get('phone',''); passwd=request.form['password']
+        dept=request.form['dept']; sem=int(request.form['semester'])
+        images=request.form.getlist('face_images[]')
+        face_blob=encode_faces(images) if images else None
+        photo=None
+        if images: photo=save_photo(images[0],'faces',f"S_{roll}_{datetime.now().strftime('%Y%m%d%H%M%S')}.jpg")
+        if not face_blob: flash('No face detected. Capture at least 1 photo.','danger'); return render_template('admin/add_student.html',depts=depts)
+        c=db()
+        if c:
+            try:
+                cur=c.cursor()
+                cur.execute("INSERT INTO students (name,roll_no,email,phone,password,dept,semester,photo_path,face_encoding) VALUES(%s,%s,%s,%s,MD5(%s),%s,%s,%s,%s)",
+                            (name,roll,email,phone,passwd,dept,sem,photo,face_blob))
+                c.commit(); c.close(); flash(f'Student {name} added!','success'); return redirect(url_for('admin_students'))
+            except Error as e: c.close(); flash(f'Error: {e}','danger')
+    return render_template('admin/add_student.html', depts=depts)
+
+@app.route('/admin/students/edit/<int:sid>', methods=['GET','POST'])
+@login_required
+@role_required('admin')
+def admin_edit_student(sid):
+    depts=get_depts(); c=db()
+    if not c: flash('DB error','danger'); return redirect(url_for('admin_students'))
+    cur=c.cursor(dictionary=True)
+    if request.method=='POST':
+        name=request.form['name']; email=request.form['email']; phone=request.form.get('phone','')
+        dept=request.form['dept']; sem=int(request.form['semester']); active=int(request.form.get('is_active',1))
+        passwd=request.form.get('new_password','')
+        images=request.form.getlist('face_images[]')
+        cur2=c.cursor()
+        if passwd:
+            cur2.execute("UPDATE students SET name=%s,email=%s,phone=%s,dept=%s,semester=%s,is_active=%s,password=MD5(%s) WHERE id=%s",(name,email,phone,dept,sem,active,passwd,sid))
+        else:
+            cur2.execute("UPDATE students SET name=%s,email=%s,phone=%s,dept=%s,semester=%s,is_active=%s WHERE id=%s",(name,email,phone,dept,sem,active,sid))
+        if images:
+            face_blob=encode_faces(images)
+            photo=save_photo(images[0],'faces',f"S_{sid}_{datetime.now().strftime('%Y%m%d%H%M%S')}.jpg")
+            if face_blob: cur2.execute("UPDATE students SET face_encoding=%s,photo_path=%s WHERE id=%s",(face_blob,photo,sid))
+        c.commit(); c.close(); flash('Student updated!','success'); return redirect(url_for('admin_students'))
+    cur.execute("SELECT * FROM students WHERE id=%s",(sid,)); s=cur.fetchone(); c.close()
+    return render_template('admin/edit_student.html', s=s, depts=depts)
+
+@app.route('/admin/students/delete/<int:sid>', methods=['POST'])
+@login_required
+@role_required('admin')
+def admin_delete_student(sid):
+    c=db()
+    if c:
+        cur=c.cursor(dictionary=True)
+        cur.execute("SELECT photo_path FROM students WHERE id=%s",(sid,)); r=cur.fetchone()
+        if r and r['photo_path']:
+            try: os.remove(f"static/{r['photo_path']}")
+            except: pass
+        cur2=c.cursor()
+        cur2.execute("DELETE FROM students WHERE id=%s",(sid,)); c.commit(); c.close()
+        flash('Student deleted.','success')
+    return redirect(url_for('admin_students'))
+
+# ── Admin: All Faculty ────────────────────────────────
+@app.route('/admin/faculty')
+@login_required
+@role_required('admin')
+def admin_faculty():
+    c=db(); rows=[]
+    if c:
+        cur=c.cursor(dictionary=True)
+        cur.execute("SELECT * FROM faculty ORDER BY dept,name"); rows=cur.fetchall(); c.close()
+    return render_template('admin/faculty.html', faculty=rows)
+
+@app.route('/admin/faculty/add', methods=['GET','POST'])
+@login_required
+@role_required('admin')
+def admin_add_faculty():
+    depts=get_depts()
+    if request.method=='POST':
+        title=request.form['title']; name=request.form['name']
+        emp=request.form['employee_id']; email=request.form['email']
+        phone=request.form.get('phone',''); passwd=request.form['password']; dept=request.form['dept']
+        photo_b64=request.form.get('profile_image','')
+        photo=save_photo(photo_b64,'profiles',f"F_{emp}_{datetime.now().strftime('%Y%m%d%H%M%S')}.jpg") if photo_b64 else None
+        c=db()
+        if c:
+            try:
+                cur=c.cursor()
+                cur.execute("INSERT INTO faculty (title,name,employee_id,email,phone,password,dept,photo_path) VALUES(%s,%s,%s,%s,%s,MD5(%s),%s,%s)",
+                            (title,name,emp,email,phone,passwd,dept,photo))
+                c.commit(); c.close(); flash(f'Faculty {title} {name} added!','success'); return redirect(url_for('admin_faculty'))
+            except Error as e: c.close(); flash(f'Error: {e}','danger')
+    return render_template('admin/add_faculty.html', depts=depts)
+
+@app.route('/admin/faculty/edit/<int:fid>', methods=['GET','POST'])
+@login_required
+@role_required('admin')
+def admin_edit_faculty(fid):
+    depts=get_depts(); c=db()
+    if not c: return redirect(url_for('admin_faculty'))
+    cur=c.cursor(dictionary=True)
+    if request.method=='POST':
+        title=request.form['title']; name=request.form['name']
+        email=request.form['email']; phone=request.form.get('phone','')
+        dept=request.form['dept']; active=int(request.form.get('is_active',1))
+        passwd=request.form.get('new_password','')
+        photo_b64=request.form.get('profile_image','')
+        cur2=c.cursor()
+        if passwd: cur2.execute("UPDATE faculty SET title=%s,name=%s,email=%s,phone=%s,dept=%s,is_active=%s,password=MD5(%s) WHERE id=%s",(title,name,email,phone,dept,active,passwd,fid))
+        else: cur2.execute("UPDATE faculty SET title=%s,name=%s,email=%s,phone=%s,dept=%s,is_active=%s WHERE id=%s",(title,name,email,phone,dept,active,fid))
+        if photo_b64:
+            photo=save_photo(photo_b64,'profiles',f"F_{fid}_{datetime.now().strftime('%Y%m%d%H%M%S')}.jpg")
+            if photo: cur2.execute("UPDATE faculty SET photo_path=%s WHERE id=%s",(photo,fid))
+        c.commit(); c.close(); flash('Faculty updated!','success'); return redirect(url_for('admin_faculty'))
+    cur.execute("SELECT * FROM faculty WHERE id=%s",(fid,)); f=cur.fetchone(); c.close()
+    return render_template('admin/edit_faculty.html', f=f, depts=depts)
+
+@app.route('/admin/faculty/delete/<int:fid>', methods=['POST'])
+@login_required
+@role_required('admin')
+def admin_delete_faculty(fid):
+    c=db()
+    if c:
+        cur=c.cursor(dictionary=True)
+        cur.execute("SELECT photo_path FROM faculty WHERE id=%s",(fid,)); r=cur.fetchone()
+        if r and r['photo_path']:
+            try: os.remove(f"static/{r['photo_path']}")
+            except: pass
+        cur2=c.cursor(); cur2.execute("DELETE FROM faculty WHERE id=%s",(fid,)); c.commit(); c.close()
+        flash('Faculty deleted.','success')
+    return redirect(url_for('admin_faculty'))
+
+# ── Admin: Principals ─────────────────────────────────
+@app.route('/admin/principals')
+@login_required
+@role_required('admin')
+def admin_principals():
+    c=db(); rows=[]
+    if c:
+        cur=c.cursor(dictionary=True); cur.execute("SELECT * FROM principal ORDER BY name"); rows=cur.fetchall(); c.close()
+    return render_template('admin/principals.html', principals=rows)
+
+@app.route('/admin/principals/add', methods=['GET','POST'])
+@login_required
+@role_required('admin')
+def admin_add_principal():
+    depts=get_depts()
+    if request.method=='POST':
+        name=request.form['name']; emp=request.form['employee_id']
+        email=request.form['email']; phone=request.form.get('phone',''); passwd=request.form['password']; dept=request.form.get('dept','')
+        photo_b64=request.form.get('profile_image','')
+        photo=save_photo(photo_b64,'profiles',f"PR_{emp}_{datetime.now().strftime('%Y%m%d%H%M%S')}.jpg") if photo_b64 else None
+        c=db()
+        if c:
+            try:
+                cur=c.cursor()
+                cur.execute("INSERT INTO principal (name,employee_id,email,phone,password,dept,photo_path) VALUES(%s,%s,%s,%s,MD5(%s),%s,%s)",(name,emp,email,phone,passwd,dept,photo))
+                c.commit(); c.close(); flash('Principal added!','success'); return redirect(url_for('admin_principals'))
+            except Error as e: c.close(); flash(f'Error: {e}','danger')
+    return render_template('admin/add_principal.html', depts=depts)
+
+@app.route('/admin/principals/edit/<int:pid>', methods=['GET','POST'])
+@login_required
+@role_required('admin')
+def admin_edit_principal(pid):
+    depts=get_depts(); c=db()
+    if not c: return redirect(url_for('admin_principals'))
+    cur=c.cursor(dictionary=True)
+    if request.method=='POST':
+        name=request.form['name']; email=request.form['email']; phone=request.form.get('phone','')
+        dept=request.form.get('dept',''); active=int(request.form.get('is_active',1)); passwd=request.form.get('new_password','')
+        photo_b64=request.form.get('profile_image','')
+        cur2=c.cursor()
+        if passwd: cur2.execute("UPDATE principal SET name=%s,email=%s,phone=%s,dept=%s,is_active=%s,password=MD5(%s) WHERE id=%s",(name,email,phone,dept,active,passwd,pid))
+        else: cur2.execute("UPDATE principal SET name=%s,email=%s,phone=%s,dept=%s,is_active=%s WHERE id=%s",(name,email,phone,dept,active,pid))
+        if photo_b64:
+            photo=save_photo(photo_b64,'profiles',f"PR_{pid}_{datetime.now().strftime('%Y%m%d%H%M%S')}.jpg")
+            if photo: cur2.execute("UPDATE principal SET photo_path=%s WHERE id=%s",(photo,pid))
+        c.commit(); c.close(); flash('Principal updated!','success'); return redirect(url_for('admin_principals'))
+    cur.execute("SELECT * FROM principal WHERE id=%s",(pid,)); p=cur.fetchone(); c.close()
+    return render_template('admin/edit_principal.html', p=p, depts=depts)
+
+@app.route('/admin/principals/delete/<int:pid>', methods=['POST'])
+@login_required
+@role_required('admin')
+def admin_delete_principal(pid):
+    c=db()
+    if c:
+        cur=c.cursor(); cur.execute("DELETE FROM principal WHERE id=%s",(pid,)); c.commit(); c.close()
+        flash('Principal deleted.','success')
+    return redirect(url_for('admin_principals'))
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  MARK ATTENDANCE (Faculty marks Students, Principal marks Faculty)
+# ══════════════════════════════════════════════════════════════════════════════
+@app.route('/mark')
+@login_required
+@role_required('admin','faculty','principal')
+def mark():
+    return render_template('mark.html')
+
+@app.route('/api/recognize', methods=['POST'])
+@login_required
+def recognize():
+    d = request.get_json(); img_b64=d.get('image','')
+    try:
+        data  = base64.b64decode(img_b64.split(',')[1])
+        arr   = np.frombuffer(data, np.uint8)
+        frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        rgb   = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        locs  = face_recognition.face_locations(rgb, model='hog')
+        encs  = face_recognition.face_encodings(rgb, locs)
+    except Exception as e:
+        return jsonify({'status':'error','message':str(e)})
+    if not encs: return jsonify({'status':'no_face'})
+
+    role = session['role']
+    c = db()
+    if not c: return jsonify({'status':'error','message':'DB error'})
+    cur = c.cursor(dictionary=True)
+
+    results = []
+
+    if role in ('faculty','admin'):
+        # Recognize students
+        if role=='faculty':
+            cur.execute("SELECT id,name,roll_no,dept,semester,photo_path,face_encoding FROM students WHERE dept=%s AND is_active=1 AND face_encoding IS NOT NULL",(session['dept'],))
+        else:
+            cur.execute("SELECT id,name,roll_no,dept,semester,photo_path,face_encoding FROM students WHERE is_active=1 AND face_encoding IS NOT NULL")
+        known = cur.fetchall()
+
+        for enc in encs:
+            best=None; best_d=0.55
+            for s in known:
+                try:
+                    ke=pickle.loads(s['face_encoding'])
+                    dist=face_recognition.face_distance([ke],enc)[0]
+                    if dist<best_d: best_d=dist; best=s
+                except: continue
+            if best:
+                conf=round((1-best_d)*100,1)
+                cur.execute("SELECT id FROM attendance WHERE student_id=%s AND timestamp>NOW()-INTERVAL 2 HOUR",(best['id'],))
+                already=cur.fetchone()
+                if not already:
+                    cur2=c.cursor()
+                    cur2.execute("INSERT INTO attendance (student_id,faculty_id,status,confidence,semester) VALUES(%s,%s,'Present',%s,%s)",
+                                 (best['id'],session['uid'] if role=='faculty' else None,conf,best['semester']))
+                    c.commit()
+                    results.append({'status':'marked','name':best['name'],'roll_no':best['roll_no'],
+                                    'dept':best['dept'],'sem':best['semester'],'confidence':conf,
+                                    'photo':best['photo_path'] or ''})
+                else:
+                    results.append({'status':'already','name':best['name'],'roll_no':best['roll_no'],
+                                    'dept':best['dept'],'sem':best['semester'],'confidence':conf,
+                                    'photo':best['photo_path'] or ''})
+            else:
+                results.append({'status':'unknown'})
+
+    elif role == 'principal':
+        # Recognize faculty
+        cur.execute("SELECT id,title,name,employee_id,dept,photo_path,face_encoding FROM faculty WHERE is_active=1 AND face_encoding IS NOT NULL")
+        known=cur.fetchall()
+        for enc in encs:
+            best=None; best_d=0.55
+            for f in known:
+                if not f['face_encoding']: continue
+                try:
+                    ke=pickle.loads(f['face_encoding'])
+                    dist=face_recognition.face_distance([ke],enc)[0]
+                    if dist<best_d: best_d=dist; best=f
+                except: continue
+            if best:
+                conf=round((1-best_d)*100,1)
+                cur.execute("SELECT id FROM faculty_attendance WHERE faculty_id=%s AND timestamp>NOW()-INTERVAL 2 HOUR",(best['id'],))
+                already=cur.fetchone()
+                if not already:
+                    cur2=c.cursor()
+                    cur2.execute("INSERT INTO faculty_attendance (faculty_id,marked_by,status,confidence) VALUES(%s,%s,'Present',%s)",
+                                 (best['id'],session['uid'],conf))
+                    c.commit()
+                    results.append({'status':'marked','name':f"{best['title']} {best['name']}",
+                                    'roll_no':best['employee_id'],'dept':best['dept'],'confidence':conf,
+                                    'photo':best['photo_path'] or ''})
+                else:
+                    results.append({'status':'already','name':f"{best['title']} {best['name']}",
+                                    'roll_no':best['employee_id'],'dept':best['dept'],'confidence':conf,
+                                    'photo':best['photo_path'] or ''})
+            else:
+                results.append({'status':'unknown'})
+
+    c.close()
+    return jsonify({'status':'ok','results':results})
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  ATTENDANCE RECORDS + CSV DOWNLOAD
+# ══════════════════════════════════════════════════════════════════════════════
+@app.route('/attendance')
+@login_required
+def attendance():
+    c=db(); records=[]; depts=[]
+    date_f=request.args.get('date',''); dept_f=request.args.get('dept',''); sem_f=request.args.get('sem','')
+    if c:
+        cur=c.cursor(dictionary=True)
+        role=session['role']
+        if role in ('admin','principal'):
+            q="""SELECT s.name,s.roll_no,s.dept,s.semester,s.photo_path,
+                        a.timestamp,a.status,a.confidence,a.subject,a.id
+                 FROM attendance a JOIN students s ON a.student_id=s.id WHERE 1=1"""
+            params=[]
+            if date_f: q+=" AND DATE(a.timestamp)=%s"; params.append(date_f)
+            if dept_f: q+=" AND s.dept=%s"; params.append(dept_f)
+            if sem_f:  q+=" AND s.semester=%s"; params.append(sem_f)
+            q+=" ORDER BY a.timestamp DESC"
+            cur.execute(q,params); records=cur.fetchall()
+        elif role=='faculty':
+            q="""SELECT s.name,s.roll_no,s.dept,s.semester,s.photo_path,
+                        a.timestamp,a.status,a.confidence,a.subject,a.id
+                 FROM attendance a JOIN students s ON a.student_id=s.id
+                 WHERE a.faculty_id=%s"""
+            params=[session['uid']]
+            if date_f: q+=" AND DATE(a.timestamp)=%s"; params.append(date_f)
+            if sem_f:  q+=" AND s.semester=%s"; params.append(sem_f)
+            q+=" ORDER BY a.timestamp DESC"
+            cur.execute(q,params); records=cur.fetchall()
+        elif role=='student':
+            q="SELECT a.timestamp,a.status,a.confidence,a.subject FROM attendance a WHERE a.student_id=%s"
+            params=[session['uid']]
+            if date_f: q+=" AND DATE(a.timestamp)=%s"; params.append(date_f)
+            q+=" ORDER BY a.timestamp DESC"
+            cur.execute(q,params); records=cur.fetchall()
+        cur.execute("SELECT DISTINCT dept FROM students ORDER BY dept"); depts=[r['dept'] for r in cur.fetchall()]
+        c.close()
+    return render_template('attendance.html', records=records, depts=depts,
+                           date_f=date_f, dept_f=dept_f, sem_f=sem_f)
+
+@app.route('/attendance/csv')
+@login_required
+def download_csv():
+    c=db(); role=session['role']
+    date_f=request.args.get('date',''); dept_f=request.args.get('dept',''); sem_f=request.args.get('sem','')
+    who=request.args.get('who','student')  # student or faculty
+    if not c: flash('DB error','danger'); return redirect(url_for('attendance'))
+    cur=c.cursor(dictionary=True)
+
+    if who=='faculty' and role in ('admin','principal'):
+        cur.execute("""SELECT f.title,f.name,f.employee_id,f.dept,fa.timestamp,fa.status,fa.confidence
+                       FROM faculty_attendance fa JOIN faculty f ON fa.faculty_id=f.id
+                       ORDER BY fa.timestamp DESC""")
+        rows=cur.fetchall()
+        fieldnames=['title','name','employee_id','dept','timestamp','status','confidence']
+        fname='faculty_attendance.csv'
+    else:
+        q="""SELECT s.name,s.roll_no,s.dept,s.semester,a.timestamp,a.status,a.confidence,a.subject
+             FROM attendance a JOIN students s ON a.student_id=s.id WHERE 1=1"""
+        params=[]
+        if role=='faculty': q+=" AND a.faculty_id=%s"; params.append(session['uid'])
+        if date_f: q+=" AND DATE(a.timestamp)=%s"; params.append(date_f)
+        if dept_f: q+=" AND s.dept=%s"; params.append(dept_f)
+        if sem_f:  q+=" AND s.semester=%s"; params.append(sem_f)
+        q+=" ORDER BY a.timestamp DESC"
+        cur.execute(q,params); rows=cur.fetchall()
+        fieldnames=['name','roll_no','dept','semester','timestamp','status','confidence','subject']
+        fname='student_attendance.csv'
+
+    c.close()
+    si=io.StringIO()
+    writer=csv.DictWriter(si, fieldnames=fieldnames, extrasaction='ignore')
+    writer.writeheader(); writer.writerows(rows)
+    output=io.BytesIO(); output.write(si.getvalue().encode('utf-8')); output.seek(0)
+    return send_file(output, mimetype='text/csv', as_attachment=True, download_name=fname)
+
+@app.route('/faculty_attendance')
+@login_required
+@role_required('admin','principal')
+def faculty_attendance():
+    c=db(); records=[]
+    date_f=request.args.get('date','')
+    if c:
+        cur=c.cursor(dictionary=True)
+        q="""SELECT f.title,f.name,f.employee_id,f.dept,f.photo_path,
+                    fa.timestamp,fa.status,fa.confidence,fa.id
+             FROM faculty_attendance fa JOIN faculty f ON fa.faculty_id=f.id WHERE 1=1"""
+        params=[]
+        if date_f: q+=" AND DATE(fa.timestamp)=%s"; params.append(date_f)
+        q+=" ORDER BY fa.timestamp DESC"
+        cur.execute(q,params); records=cur.fetchall(); c.close()
+    return render_template('faculty_attendance.html', records=records, date_f=date_f)
+
+# ── Students list (faculty/principal) ────────────────
+@app.route('/students')
+@login_required
+@role_required('admin','faculty','principal')
+def students():
+    c=db(); rows=[]
+    if c:
+        cur=c.cursor(dictionary=True)
+        if session['role']=='faculty':
+            cur.execute("SELECT * FROM students WHERE dept=%s AND is_active=1 ORDER BY semester,name",(session['dept'],))
+        else:
+            cur.execute("SELECT * FROM students WHERE is_active=1 ORDER BY dept,semester,name")
+        rows=cur.fetchall(); c.close()
+    return render_template('students.html', students=rows)
+
+# ── Faculty list ──────────────────────────────────────
+@app.route('/faculty')
+@login_required
+@role_required('admin','principal')
+def faculty_list():
+    c=db(); rows=[]
+    if c:
+        cur=c.cursor(dictionary=True)
+        cur.execute("SELECT * FROM faculty WHERE is_active=1 ORDER BY dept,name"); rows=cur.fetchall(); c.close()
+    return render_template('faculty_list.html', faculty=rows)
+
+# ── Profile ───────────────────────────────────────────
+@app.route('/profile', methods=['GET','POST'])
+@login_required
+def profile():
+    c=db()
+    if request.method=='POST' and c:
+        name=request.form['name']; phone=request.form.get('phone','')
+        photo_b64=request.form.get('profile_image','')
+        role=session['role']
+        tbl={'admin':'admin','principal':'principal','faculty':'faculty','student':'students'}[role]
+        cur=c.cursor()
+        if photo_b64:
+            folder='faces' if role=='student' else 'profiles'
+            photo=save_photo(photo_b64,folder,f"PF_{session['uid']}_{datetime.now().strftime('%Y%m%d%H%M%S')}.jpg")
+            if photo:
+                cur.execute(f"UPDATE `{tbl}` SET name=%s,phone=%s,photo_path=%s WHERE id=%s",(name,phone,photo,session['uid']))
+                session['photo']=photo
+            else: cur.execute(f"UPDATE `{tbl}` SET name=%s,phone=%s WHERE id=%s",(name,phone,session['uid']))
+        else: cur.execute(f"UPDATE `{tbl}` SET name=%s,phone=%s WHERE id=%s",(name,phone,session['uid']))
+        c.commit(); c.close()
+        session['name']=name; flash('Profile updated!','success'); return redirect(url_for('profile'))
+    user=None
+    if c:
+        cur=c.cursor(dictionary=True)
+        tbl={'admin':'admin','principal':'principal','faculty':'faculty','student':'students'}[session['role']]
+        cur.execute(f"SELECT * FROM `{tbl}` WHERE id=%s",(session['uid'],)); user=cur.fetchone(); c.close()
+    return render_template('profile.html', user=user)
+
+# ── Reports ───────────────────────────────────────────
+@app.route('/reports')
+@login_required
+@role_required('admin','principal','faculty')
+def reports():
+    c=db(); data={}
+    if c:
+        cur=c.cursor(dictionary=True)
+        role=session['role']
+        if role in ('admin','principal'):
+            cur.execute("SELECT DATE(timestamp) day,COUNT(*) n FROM attendance WHERE timestamp>=NOW()-INTERVAL 30 DAY GROUP BY DATE(timestamp) ORDER BY day"); data['trend']=cur.fetchall()
+            cur.execute("SELECT s.dept,COUNT(DISTINCT a.student_id) n FROM attendance a JOIN students s ON a.student_id=s.id WHERE DATE(a.timestamp)=CURDATE() GROUP BY s.dept"); data['dept_today']=cur.fetchall()
+            cur.execute("SELECT s.name,s.roll_no,s.dept,s.photo_path,COUNT(a.id) days FROM attendance a JOIN students s ON a.student_id=s.id GROUP BY a.student_id ORDER BY days DESC LIMIT 10"); data['top']=cur.fetchall()
+        elif role=='faculty':
+            cur.execute("SELECT DATE(a.timestamp) day,COUNT(*) n FROM attendance a WHERE a.faculty_id=%s AND a.timestamp>=NOW()-INTERVAL 30 DAY GROUP BY DATE(a.timestamp) ORDER BY day",(session['uid'],)); data['trend']=cur.fetchall()
+            cur.execute("SELECT s.semester,COUNT(DISTINCT a.student_id) n FROM attendance a JOIN students s ON a.student_id=s.id WHERE a.faculty_id=%s AND DATE(a.timestamp)=CURDATE() GROUP BY s.semester",(session['uid'],)); data['dept_today']=cur.fetchall()
+            cur.execute("SELECT s.name,s.roll_no,s.photo_path,COUNT(a.id) days FROM attendance a JOIN students s ON a.student_id=s.id WHERE a.faculty_id=%s GROUP BY a.student_id ORDER BY days DESC LIMIT 10",(session['uid'],)); data['top']=cur.fetchall()
+        c.close()
+    return render_template('reports.html', data=data)
+
+if __name__=='__main__':
+    ip=local_ip()
+    print(f"\n{'='*55}")
+    print(f"  🚀 Face Attendance System ")
+    print(f"  Local:   http://127.0.0.1:5000")
+    print(f"  Mobile:  http://{ip}:5000  ← open on phone (same WiFi)")
+    print(f"  Admin:   admin@college.edu / Admin@123")
+    print(f"{'='*55}\n")
+    app.run(host='0.0.0.0', port=5000, debug=True)
+------------------------------------------------------------Schema.sql-------------------------------------------------------------------------
+-- ════════════════════════════════════════════════════════
+--   Face Attendance System  — Complete Schema
+--   Roles: admin(1), principal, professor/dr/sir/madam, student
+-- ════════════════════════════════════════════════════════
+
+CREATE DATABASE IF NOT EXISTS fas_db CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+USE fas_db;
+
+-- ── Admin (only one, hardcoded) ───────────────────────
+CREATE TABLE IF NOT EXISTS admin (
+    id         INT AUTO_INCREMENT PRIMARY KEY,
+    username   VARCHAR(50)  NOT NULL DEFAULT 'admin',
+    password   VARCHAR(255) NOT NULL,
+    email      VARCHAR(150) NOT NULL DEFAULT 'admin@college.edu',
+    name       VARCHAR(100) NOT NULL DEFAULT 'Administrator',
+    reset_otp  VARCHAR(10),
+    otp_expiry DATETIME
+);
+INSERT IGNORE INTO admin (id,username,password,email,name)
+VALUES (1,'admin',MD5('Admin@123'),'admin@college.edu','Administrator');
+
+-- ── Principal ─────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS principal (
+    id              INT AUTO_INCREMENT PRIMARY KEY,
+    name            VARCHAR(100) NOT NULL,
+    employee_id     VARCHAR(30)  UNIQUE NOT NULL,
+    email           VARCHAR(150) UNIQUE NOT NULL,
+    phone           VARCHAR(15),
+    password        VARCHAR(255) NOT NULL,
+    dept            VARCHAR(100),
+    photo_path      VARCHAR(255),
+    is_active       TINYINT DEFAULT 1,
+    reset_otp       VARCHAR(10),
+    otp_expiry      DATETIME,
+    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- ── Faculty (Professor / Dr / Sir / Madam) ────────────
+CREATE TABLE IF NOT EXISTS faculty (
+    id              INT AUTO_INCREMENT PRIMARY KEY,
+    title           ENUM('Prof.','Dr.','Mr.','Mrs.','Ms.') NOT NULL DEFAULT 'Prof.',
+    name            VARCHAR(100) NOT NULL,
+    employee_id     VARCHAR(30)  UNIQUE NOT NULL,
+    email           VARCHAR(150) UNIQUE NOT NULL,
+    phone           VARCHAR(15),
+    password        VARCHAR(255) NOT NULL,
+    dept            VARCHAR(100) NOT NULL,
+    photo_path      VARCHAR(255),
+    face_encoding   LONGBLOB,
+    is_active       TINYINT DEFAULT 1,
+    reset_otp       VARCHAR(10),
+    otp_expiry      DATETIME,
+    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- ── Departments ───────────────────────────────────────
+CREATE TABLE IF NOT EXISTS departments (
+    id         INT AUTO_INCREMENT PRIMARY KEY,
+    name       VARCHAR(100) UNIQUE NOT NULL,
+    degree     VARCHAR(50),
+    semesters  INT DEFAULT 6
+);
+
+INSERT IGNORE INTO departments (name,degree,semesters) VALUES
+  ('MCA','Master of Computer Applications',8),
+  ('MBA','Master of Business Administration',4),
+  ('BCA','Bachelor of Computer Applications',6),
+  ('B.Sc CS','Bachelor of Science (Computer Science)',6),
+  ('B.Sc IT','Bachelor of Science (Information Technology)',6),
+  ('B.Sc Maths','Bachelor of Science (Mathematics)',6),
+  ('M.Sc CS','Master of Science (Computer Science)',4),
+  ('M.Sc IT','Master of Science (Information Technology)',4),
+  ('B.Com','Bachelor of Commerce',6),
+  ('M.Com','Master of Commerce',4),
+  ('B.E. CS','Bachelor of Engineering (CS)',8),
+  ('B.E. IT','Bachelor of Engineering (IT)',8),
+  ('M.E. CS','Master of Engineering (CS)',4),
+  ('BBA','Bachelor of Business Administration',6),
+  ('B.Sc Physics','Bachelor of Science (Physics)',6),
+  ('B.Sc Chemistry','Bachelor of Science (Chemistry)',6),
+  ('B.A.','Bachelor of Arts',6),
+  ('M.A.','Master of Arts',4),
+  ('LLB','Bachelor of Laws',6),
+  ('LLM','Master of Laws',4),
+  ('MBBS','Bachelor of Medicine',10),
+  ('B.Pharm','Bachelor of Pharmacy',8),
+  ('D.Pharm','Diploma in Pharmacy',4);
+
+-- ── Students ──────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS students (
+    id              INT AUTO_INCREMENT PRIMARY KEY,
+    name            VARCHAR(100) NOT NULL,
+    roll_no         VARCHAR(30)  UNIQUE NOT NULL,
+    email           VARCHAR(150) UNIQUE NOT NULL,
+    phone           VARCHAR(15),
+    password        VARCHAR(255) NOT NULL,
+    dept            VARCHAR(100) NOT NULL,
+    semester        INT NOT NULL DEFAULT 1,
+    year            INT,
+    photo_path      VARCHAR(255),
+    face_encoding   LONGBLOB,
+    is_active       TINYINT DEFAULT 1,
+    reset_otp       VARCHAR(10),
+    otp_expiry      DATETIME,
+    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- ── Attendance ────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS attendance (
+    id              INT AUTO_INCREMENT PRIMARY KEY,
+    student_id      INT NOT NULL,
+    faculty_id      INT,
+    timestamp       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    status          ENUM('Present','Absent','Late') DEFAULT 'Present',
+    confidence      FLOAT,
+    subject         VARCHAR(100),
+    semester        INT,
+    FOREIGN KEY (student_id) REFERENCES students(id) ON DELETE CASCADE,
+    INDEX idx_student   (student_id),
+    INDEX idx_timestamp (timestamp),
+    INDEX idx_faculty   (faculty_id)
+);
+
+-- ── Faculty Attendance (principal marks faculty) ──────
+CREATE TABLE IF NOT EXISTS faculty_attendance (
+    id              INT AUTO_INCREMENT PRIMARY KEY,
+    faculty_id      INT NOT NULL,
+    marked_by       INT,   -- principal id
+    timestamp       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    status          ENUM('Present','Absent','Late') DEFAULT 'Present',
+    confidence      FLOAT,
+    FOREIGN KEY (faculty_id) REFERENCES faculty(id) ON DELETE CASCADE
+);
+
+-- ── Password Reset Tokens ─────────────────────────────
+CREATE TABLE IF NOT EXISTS password_resets (
+    id         INT AUTO_INCREMENT PRIMARY KEY,
+    email      VARCHAR(150) NOT NULL,
+    role       VARCHAR(20)  NOT NULL,
+    token      VARCHAR(64)  NOT NULL,
+    expires_at DATETIME     NOT NULL,
+    used       TINYINT DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_token (token),
+    INDEX idx_email (email)
+);
+
+-- ── Useful views ──────────────────────────────────────
+CREATE OR REPLACE VIEW v_today_attendance AS
+SELECT s.name, s.roll_no, s.dept, s.semester, s.photo_path,
+       a.timestamp, a.status, a.confidence, a.subject, a.faculty_id
+FROM attendance a JOIN students s ON a.student_id=s.id
+WHERE DATE(a.timestamp)=CURDATE();
+
+CREATE OR REPLACE VIEW v_student_summary AS
+SELECT s.id, s.name, s.roll_no, s.dept, s.semester,
+       COUNT(a.id) AS total_days, MAX(a.timestamp) AS last_seen
+FROM students s LEFT JOIN attendance a ON s.id=a.student_id
+GROUP BY s.id;
+
+
+
+SELECT * FROM admin;
+SELECT * FROM principal;
+SELECT * FROM  faculty;
+SELECT * FROM attendance;
+SELECT * FROM  departments;
+SELECT * FROM faculty_attendance;
+
+-------------------------------------------add_faculty.html-----------------------------------------------------------------------------
+
+{% extends 'base.html' %}
+{% block title %}Add Faculty{% endblock %}
+{% block ptitle %}<i class="bi bi-person-plus-fill me-2" style="color:var(--accent);"></i>Add Faculty (Admin){% endblock %}
+{% block content %}
+<form method="POST">
+<div class="row g-3">
+  <div class="col-lg-6">
+    <div class="card">
+      <h6 class="mb-3" style="font-family:'Syne',sans-serif;font-weight:700;"><i class="bi bi-person-workspace me-2" style="color:var(--primary);"></i>Faculty Details</h6>
+      <div class="mb-2">
+        <label class="fl">Title *</label>
+        <select name="title" class="fi" required>
+          <option value="Prof.">Prof. (Professor)</option>
+          <option value="Dr.">Dr. (Doctor)</option>
+          <option value="Mr.">Mr. (Sir)</option>
+          <option value="Mrs.">Mrs. (Madam)</option>
+          <option value="Ms.">Ms. (Madam)</option>
+        </select>
+      </div>
+      <div class="mb-2"><label class="fl">Full Name *</label><input type="text" name="name" class="fi" placeholder="e.g. Meena Joshi" required/></div>
+      <div class="mb-2"><label class="fl">Employee ID *</label><input type="text" name="employee_id" class="fi" placeholder="e.g. FAC001" required/></div>
+      <div class="mb-2"><label class="fl">Email *</label><input type="email" name="email" class="fi" placeholder="faculty@college.edu" required/></div>
+      <div class="mb-2"><label class="fl">Phone</label><input type="tel" name="phone" class="fi" placeholder="10-digit"/></div>
+      <div class="mb-2"><label class="fl">Password *</label><input type="password" name="password" class="fi" placeholder="Min 6 chars" required minlength="6"/></div>
+      <div class="mb-2">
+        <label class="fl">Department *</label>
+        <select name="dept" class="fi" required>
+          <option value="">Select Department</option>
+          {% for d in depts %}<option value="{{ d.name }}">{{ d.name }}</option>{% endfor %}
+        </select>
+      </div>
+    </div>
+  </div>
+
+  <div class="col-lg-6">
+    <div class="card">
+      <h6 class="mb-3" style="font-family:'Syne',sans-serif;font-weight:700;"><i class="bi bi-camera-fill me-2" style="color:var(--accent);"></i>Profile Photo <small style="color:var(--muted);font-weight:400;">(optional)</small></h6>
+      <div class="d-flex align-items-center gap-3 mb-3">
+        <div id="profPreview" style="width:72px;height:72px;border-radius:50%;background:var(--card2);border:2px dashed var(--border);display:flex;align-items:center;justify-content:center;overflow:hidden;flex-shrink:0;">
+          <i class="bi bi-person-fill" style="font-size:2rem;color:var(--muted);"></i>
+        </div>
+        <div>
+          <button type="button" onclick="openProfCam()" class="btn btn-s sm"><i class="bi bi-camera-fill"></i> Capture from Camera</button>
+          <div style="font-size:.72rem;color:var(--muted);margin-top:4px;">Or leave blank for default avatar</div>
+        </div>
+      </div>
+      <input type="hidden" name="profile_image" id="profImgInput"/>
+
+      <!-- Faculty Face for recognition (optional) -->
+      <h6 class="mb-2 mt-3" style="font-family:'Syne',sans-serif;font-weight:700;font-size:.9rem;"><i class="bi bi-person-bounding-box me-2" style="color:var(--warn);"></i>Face Data <small style="color:var(--muted);font-weight:400;">(for principal to mark faculty attendance)</small></h6>
+      <div class="cam-box mb-2" style="max-height:220px;">
+        <video id="video" autoplay muted playsinline></video>
+        <canvas id="snapCanvas" style="display:none;"></canvas>
+        <div class="cam-ov" id="camOverlay">
+          <i class="bi bi-camera-video-off" style="font-size:1.8rem;opacity:.4;"></i>
+          <span style="font-size:.8rem;">Optional: capture for attendance</span>
+        </div>
+        <div class="face-box" id="faceBox" style="display:none;"><span></span></div>
+        <div class="scan" id="scanLine" style="display:none;"></div>
+      </div>
+      <div class="d-flex gap-2 flex-wrap mb-1">
+        <button type="button" id="startBtn" class="btn btn-s sm"><i class="bi bi-camera-video-fill"></i> Start</button>
+        <button type="button" id="snapBtn" class="btn btn-g sm" style="display:none;"><i class="bi bi-camera-fill"></i> Capture</button>
+        <button type="button" id="stopBtn" class="btn btn-r sm" style="display:none;"><i class="bi bi-stop-fill"></i> Stop</button>
+      </div>
+      <div id="capStatus" style="font-size:.74rem;color:var(--muted);">0 face photo(s)</div>
+      <div class="thumbs" id="thumbs"></div>
+      <div id="hiddenFaces"></div>
+    </div>
+  </div>
+</div>
+
+<div class="card mt-3 d-flex justify-content-between align-items-center flex-wrap gap-2">
+  <div style="color:var(--muted);font-size:.82rem;"><i class="bi bi-info-circle me-1"></i>Faculty face data is used by Principal to mark faculty attendance via camera</div>
+  <div class="d-flex gap-2">
+    <a href="{{ url_for('admin_faculty') }}" class="btn btn-s sm"><i class="bi bi-x-lg"></i> Cancel</a>
+    <button type="submit" class="btn btn-p sm"><i class="bi bi-person-check-fill"></i> Add Faculty</button>
+  </div>
+</div>
+</form>
+
+<!-- Profile photo modal -->
+<div id="profModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.82);z-index:9999;align-items:center;justify-content:center;padding:14px;">
+  <div style="background:var(--card);border-radius:15px;padding:17px;width:100%;max-width:360px;border:1px solid var(--border);">
+    <div class="d-flex justify-content-between mb-2"><strong style="font-size:.9rem;">Profile Photo</strong>
+    <button onclick="closeProfCam()" style="background:none;border:none;color:var(--muted);font-size:1.2rem;cursor:pointer;"><i class="bi bi-x"></i></button></div>
+    <div class="cam-box mb-2"><video id="profVideo" autoplay muted playsinline></video><div class="cam-ov" id="profOv"><i class="bi bi-camera-video-off" style="font-size:2rem;opacity:.5;"></i></div></div>
+    <canvas id="profCanvas" style="display:none;"></canvas>
+    <button onclick="snapProf()" class="btn btn-p w-100 justify-content-center"><i class="bi bi-camera-fill"></i> Take Photo</button>
+  </div>
+</div>
+{% endblock %}
+
+{% block js %}
+<script src="{{ url_for('static',filename='js/cam.js') }}"></script>
+<script>
+let cam=null, profStream=null, faces=[];
+
+// Face camera
+document.getElementById('startBtn').addEventListener('click',async()=>{
+  cam=new FASCam({videoId:'video',canvasId:'snapCanvas',overlayId:'camOverlay',fboxId:'faceBox',scanId:'scanLine'});
+  if(await cam.start()){document.getElementById('startBtn').style.display='none';document.getElementById('snapBtn').style.display='';document.getElementById('stopBtn').style.display='';}
+});
+document.getElementById('stopBtn').addEventListener('click',()=>{cam&&cam.stop();cam=null;document.getElementById('startBtn').style.display='';document.getElementById('snapBtn').style.display='none';document.getElementById('stopBtn').style.display='none';});
+document.getElementById('snapBtn').addEventListener('click',()=>{
+  if(!cam||!cam.isActive()) return;
+  const url=cam.capture(); if(!url) return;
+  faces.push(url);
+  const img=document.createElement('img'); img.src=url; document.getElementById('thumbs').appendChild(img);
+  const inp=document.createElement('input'); inp.type='hidden'; inp.name='face_images[]'; inp.value=url; document.getElementById('hiddenFaces').appendChild(inp);
+  document.getElementById('capStatus').textContent=faces.length+' face photo(s) captured';
+  document.getElementById('capStatus').style.color=faces.length>=3?'#10b981':'var(--warn)';
+});
+
+// Profile photo
+function openProfCam(){
+  document.getElementById('profModal').style.display='flex';
+  navigator.mediaDevices.getUserMedia({video:{facingMode:'user'},audio:false}).then(s=>{profStream=s;document.getElementById('profVideo').srcObject=s;document.getElementById('profOv').style.display='none';}).catch(e=>alert('Camera: '+e.message));
+}
+function closeProfCam(){if(profStream){profStream.getTracks().forEach(t=>t.stop());profStream=null;}document.getElementById('profModal').style.display='none';}
+function snapProf(){
+  const v=document.getElementById('profVideo'),c=document.getElementById('profCanvas');
+  c.width=v.videoWidth||640;c.height=v.videoHeight||480;c.getContext('2d').drawImage(v,0,0);
+  const url=c.toDataURL('image/jpeg',.88);
+  document.getElementById('profImgInput').value=url;
+  document.getElementById('profPreview').innerHTML=`<img src="${url}" style="width:100%;height:100%;object-fit:cover;border-radius:50%;"/>`;
+  closeProfCam();
+}
+</script>
+{% endblock %}
+
+
+-------------------------------------------add_principal.html-----------------------------------------------------------------------------
+{% extends 'base.html' %}
+{% block title %}{% if p is defined %}Edit{% else %}Add{% endif %} Principal{% endblock %}
+{% block ptitle %}<i class="bi bi-building-fill me-2" style="color:var(--accent);"></i>{% if p is defined %}Edit Principal — {{ p.name }}{% else %}Add Principal{% endif %}{% endblock %}
+{% block content %}
+<form method="POST">
+<div class="row g-3 justify-content-center">
+<div class="col-lg-7">
+  <div class="card">
+    <h6 class="mb-3" style="font-family:'Syne',sans-serif;font-weight:700;"><i class="bi bi-building me-2" style="color:var(--primary);"></i>Principal Details</h6>
+
+    {% if p is defined %}
+    <div class="mb-3 text-center">
+      <div class="av-lg mx-auto mb-2">{% if p.photo_path %}<img src="{{ url_for('static',filename=p.photo_path) }}" alt=""/>{% else %}<i class="bi bi-person-fill"></i>{% endif %}</div>
+    </div>
+    {% endif %}
+
+    <div class="row g-2">
+      <div class="col-12"><label class="fl">Full Name *</label><input type="text" name="name" class="fi" value="{{ p.name if p is defined else '' }}" placeholder="e.g. Dr. R.K. Sharma" required/></div>
+      <div class="col-md-6"><label class="fl">Employee ID *</label><input type="text" name="employee_id" class="fi" value="{{ p.employee_id if p is defined else '' }}" placeholder="e.g. PRI001" {% if p is defined %}readonly{% else %}required{% endif %}/></div>
+      <div class="col-md-6"><label class="fl">Email *</label><input type="email" name="email" class="fi" value="{{ p.email if p is defined else '' }}" placeholder="principal@college.edu" required/></div>
+      <div class="col-md-6"><label class="fl">Phone</label><input type="tel" name="phone" class="fi" value="{{ p.phone if p is defined else '' }}" placeholder="10-digit"/></div>
+      <div class="col-md-6">
+        <label class="fl">Department (Optional)</label>
+        <select name="dept" class="fi">
+          <option value="">All Departments / None</option>
+          {% for d in depts %}<option value="{{ d.name }}" {% if p is defined and d.name==p.dept %}selected{% endif %}>{{ d.name }}</option>{% endfor %}
+        </select>
+      </div>
+      <div class="col-12">
+        <label class="fl">{% if p is defined %}New Password <small style="color:var(--muted);">(blank = keep current)</small>{% else %}Password *{% endif %}</label>
+        <input type="password" name="{% if p is defined %}new_password{% else %}password{% endif %}" class="fi" placeholder="{% if p is defined %}Leave blank to keep current{% else %}Min 6 characters{% endif %}" {% if p is not defined %}required minlength="6"{% endif %}/>
+      </div>
+      {% if p is defined %}
+      <div class="col-12">
+        <label class="fl">Status</label>
+        <select name="is_active" class="fi">
+          <option value="1" {% if p.is_active %}selected{% endif %}>Active</option>
+          <option value="0" {% if not p.is_active %}selected{% endif %}>Inactive</option>
+        </select>
+      </div>
+      {% endif %}
+      <div class="col-12">
+        <label class="fl"><i class="bi bi-camera me-1"></i>Profile Photo (optional)</label>
+        <div class="d-flex align-items-center gap-3">
+          <div id="profPreview" style="width:60px;height:60px;border-radius:50%;background:var(--card2);border:2px dashed var(--border);display:flex;align-items:center;justify-content:center;overflow:hidden;flex-shrink:0;">
+            {% if p is defined and p.photo_path %}<img src="{{ url_for('static',filename=p.photo_path) }}" style="width:100%;height:100%;object-fit:cover;border-radius:50%;"/>
+            {% else %}<i class="bi bi-person-fill" style="font-size:1.4rem;color:var(--muted);"></i>{% endif %}
+          </div>
+          <button type="button" onclick="openCam()" class="btn btn-s sm"><i class="bi bi-camera-fill"></i> Capture Photo</button>
+        </div>
+        <input type="hidden" name="profile_image" id="profImgInput"/>
+      </div>
+    </div>
+
+    <div class="d-flex gap-2 mt-4">
+      <a href="{{ url_for('admin_principals') }}" class="btn btn-s sm"><i class="bi bi-x-lg"></i> Cancel</a>
+      <button type="submit" class="btn btn-p sm"><i class="bi bi-check2-circle"></i> {% if p is defined %}Save Changes{% else %}Add Principal{% endif %}</button>
+    </div>
+  </div>
+</div>
+</div>
+</form>
+
+<div id="camModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.82);z-index:9999;align-items:center;justify-content:center;padding:14px;">
+  <div style="background:var(--card);border-radius:15px;padding:17px;width:100%;max-width:360px;border:1px solid var(--border);">
+    <div class="d-flex justify-content-between mb-2"><strong style="font-size:.9rem;">Profile Photo</strong>
+    <button onclick="closeCam()" style="background:none;border:none;color:var(--muted);font-size:1.2rem;cursor:pointer;"><i class="bi bi-x"></i></button></div>
+    <div class="cam-box mb-2"><video id="cv" autoplay muted playsinline></video><div class="cam-ov" id="cov"><i class="bi bi-camera-video-off" style="font-size:2rem;opacity:.5;"></i></div></div>
+    <canvas id="cc" style="display:none;"></canvas>
+    <button onclick="snapPhoto()" class="btn btn-p w-100 justify-content-center"><i class="bi bi-camera-fill"></i> Take Photo</button>
+  </div>
+</div>
+{% endblock %}
+{% block js %}
+<script>
+let cs=null;
+function openCam(){document.getElementById('camModal').style.display='flex';navigator.mediaDevices.getUserMedia({video:{facingMode:'user'},audio:false}).then(s=>{cs=s;document.getElementById('cv').srcObject=s;document.getElementById('cov').style.display='none';}).catch(e=>alert('Camera: '+e.message));}
+function closeCam(){if(cs){cs.getTracks().forEach(t=>t.stop());cs=null;}document.getElementById('camModal').style.display='none';}
+function snapPhoto(){const v=document.getElementById('cv'),c=document.getElementById('cc');c.width=v.videoWidth||640;c.height=v.videoHeight||480;c.getContext('2d').drawImage(v,0,0);const url=c.toDataURL('image/jpeg',.88);document.getElementById('profImgInput').value=url;document.getElementById('profPreview').innerHTML=`<img src="${url}" style="width:100%;height:100%;object-fit:cover;border-radius:50%;"/>`;closeCam();}
+</script>
+{% endblock %}
+
+
+------------------------------------------add_student.html--------------------------------
+{% extends 'base.html' %}
+{% block title %}Add Student{% endblock %}
+{% block ptitle %}<i class="bi bi-person-plus-fill me-2" style="color:var(--accent);"></i>Add Student (Admin){% endblock %}
+{% block content %}
+<form method="POST" id="aForm">
+<div class="row g-3">
+  <!-- Details -->
+  <div class="col-lg-5">
+    <div class="card">
+      <h6 class="mb-3" style="font-family:'Syne',sans-serif;font-weight:700;"><i class="bi bi-person-vcard me-2" style="color:var(--primary);"></i>Student Details</h6>
+      <div class="mb-2"><label class="fl">Full Name *</label><input type="text" name="name" class="fi" placeholder="e.g. Ravi Patel" required/></div>
+      <div class="mb-2"><label class="fl">Roll Number *</label><input type="text" name="roll_no" class="fi" placeholder="e.g. MCA2024001" required/></div>
+      <div class="mb-2"><label class="fl">Email *</label><input type="email" name="email" class="fi" placeholder="student@email.com" required/></div>
+      <div class="mb-2"><label class="fl">Phone</label><input type="tel" name="phone" class="fi" placeholder="10-digit"/></div>
+      <div class="mb-2"><label class="fl">Password *</label><input type="password" name="password" class="fi" placeholder="Min 6 chars" required minlength="6"/></div>
+      <div class="mb-2">
+        <label class="fl">Department *</label>
+        <select name="dept" class="fi" id="deptSel" required>
+          <option value="">Select Department</option>
+          {% for d in depts %}<option value="{{ d.name }}" data-sems="{{ d.semesters }}">{{ d.name }} — {{ d.degree }}</option>{% endfor %}
+        </select>
+      </div>
+      <div class="mb-2">
+        <label class="fl">Semester *</label>
+        <div class="d-flex flex-wrap gap-2" id="semBtns">
+          <span style="color:var(--muted);font-size:.8rem;">Select department first</span>
+        </div>
+        <input type="hidden" name="semester" id="semVal" value="1"/>
+      </div>
+    </div>
+  </div>
+
+  <!-- Face Capture -->
+  <div class="col-lg-7">
+    <div class="card">
+      <h6 class="mb-3" style="font-family:'Syne',sans-serif;font-weight:700;"><i class="bi bi-person-bounding-box me-2" style="color:var(--accent);"></i>Face Registration <small style="color:var(--muted);font-weight:400;">(capture 3–5 photos)</small></h6>
+      <div class="cam-box mb-3">
+        <video id="video" autoplay muted playsinline></video>
+        <canvas id="snapCanvas" style="display:none;"></canvas>
+        <div class="cam-ov" id="camOverlay">
+          <i class="bi bi-camera-video-off" style="font-size:2.2rem;opacity:.4;"></i>
+          <span style="font-size:.85rem;">Click "Start Camera"</span>
+        </div>
+        <div class="face-box" id="faceBox" style="display:none;"><span></span></div>
+        <div class="scan" id="scanLine" style="display:none;"></div>
+      </div>
+      <div class="d-flex gap-2 flex-wrap mb-2">
+        <button type="button" id="startBtn" class="btn btn-p sm"><i class="bi bi-camera-video-fill"></i> Start Camera</button>
+        <button type="button" id="snapBtn" class="btn btn-g sm" style="display:none;"><i class="bi bi-camera-fill"></i> Capture Photo</button>
+        <button type="button" id="stopBtn" class="btn btn-r sm" style="display:none;"><i class="bi bi-stop-fill"></i> Stop</button>
+        <button type="button" id="clearBtn" class="btn btn-s sm" style="display:none;" onclick="clearPhotos()"><i class="bi bi-trash3"></i> Clear All</button>
+      </div>
+      <div id="capStatus" style="font-size:.78rem;color:var(--muted);margin-bottom:6px;">0 photo(s) captured — need at least 1</div>
+      <div class="thumbs" id="thumbs"></div>
+      <div id="hiddenFaces"></div>
+    </div>
+  </div>
+</div>
+
+<div class="card mt-3 d-flex justify-content-between align-items-center flex-wrap gap-2">
+  <div style="color:var(--muted);font-size:.82rem;"><i class="bi bi-info-circle me-1"></i>More face photos = better recognition accuracy</div>
+  <div class="d-flex gap-2">
+    <a href="{{ url_for('admin_students') }}" class="btn btn-s sm"><i class="bi bi-x-lg"></i> Cancel</a>
+    <button type="submit" class="btn btn-p sm" id="subBtn" disabled><i class="bi bi-person-check-fill"></i> Register Student</button>
+  </div>
+</div>
+</form>
+{% endblock %}
+
+{% block js %}
+<script src="{{ url_for('static',filename='js/cam.js') }}"></script>
+<script>
+let cam = null, faces = [];
+
+// Dept → semesters
+document.getElementById('deptSel').addEventListener('change', function(){
+  const sems = parseInt(this.selectedOptions[0]?.dataset.sems || 6);
+  const wrap = document.getElementById('semBtns');
+  wrap.innerHTML = '';
+  for(let i=1;i<=sems;i++){
+    const b = document.createElement('button');
+    b.type='button'; b.className='btn '+(i===1?'btn-p':'btn-s')+' xs';
+    b.textContent = 'Sem '+i;
+    b.onclick = function(){
+      wrap.querySelectorAll('.btn').forEach(x=>x.className='btn btn-s xs');
+      this.className='btn btn-p xs';
+      document.getElementById('semVal').value = i;
+    };
+    wrap.appendChild(b);
+  }
+  document.getElementById('semVal').value=1;
+});
+
+// Camera
+document.getElementById('startBtn').addEventListener('click', async()=>{
+  cam = new FASCam({videoId:'video',canvasId:'snapCanvas',overlayId:'camOverlay',fboxId:'faceBox',scanId:'scanLine'});
+  if(await cam.start()){
+    document.getElementById('startBtn').style.display='none';
+    document.getElementById('snapBtn').style.display='';
+    document.getElementById('stopBtn').style.display='';
+  }
+});
+document.getElementById('stopBtn').addEventListener('click',()=>{
+  cam&&cam.stop(); cam=null;
+  document.getElementById('startBtn').style.display='';
+  document.getElementById('snapBtn').style.display='none';
+  document.getElementById('stopBtn').style.display='none';
+});
+document.getElementById('snapBtn').addEventListener('click',()=>{
+  if(!cam||!cam.isActive()) return;
+  const url = cam.capture();
+  if(!url) return;
+  faces.push(url);
+  const img=document.createElement('img'); img.src=url;
+  document.getElementById('thumbs').appendChild(img);
+  const inp=document.createElement('input'); inp.type='hidden'; inp.name='face_images[]'; inp.value=url;
+  document.getElementById('hiddenFaces').appendChild(inp);
+  const st=document.getElementById('capStatus');
+  st.textContent=`${faces.length} photo(s) captured`;
+  st.style.color=faces.length>=3?'#10b981':'var(--warn)';
+  document.getElementById('clearBtn').style.display='';
+  document.getElementById('subBtn').disabled=false;
+});
+function clearPhotos(){
+  faces=[];
+  document.getElementById('thumbs').innerHTML='';
+  document.getElementById('hiddenFaces').innerHTML='';
+  document.getElementById('capStatus').textContent='0 photo(s) captured';
+  document.getElementById('capStatus').style.color='var(--muted)';
+  document.getElementById('subBtn').disabled=true;
+  document.getElementById('clearBtn').style.display='none';
+}
+</script>
+{% endblock %}
+
+-------------------------------------------edit_faculty.html-----------------------------------------------------------------------------
+
+
+{% extends 'base.html' %}
+{% block title %}Add Faculty{% endblock %}
+{% block ptitle %}<i class="bi bi-person-plus-fill me-2" style="color:var(--accent);"></i>Add Faculty (Admin){% endblock %}
+{% block content %}
+<form method="POST">
+<div class="row g-3">
+  <div class="col-lg-6">
+    <div class="card">
+      <h6 class="mb-3" style="font-family:'Syne',sans-serif;font-weight:700;"><i class="bi bi-person-workspace me-2" style="color:var(--primary);"></i>Faculty Details</h6>
+      <div class="mb-2">
+        <label class="fl">Title *</label>
+        <select name="title" class="fi" required>
+          <option value="Prof.">Prof. (Professor)</option>
+          <option value="Dr.">Dr. (Doctor)</option>
+          <option value="Mr.">Mr. (Sir)</option>
+          <option value="Mrs.">Mrs. (Madam)</option>
+          <option value="Ms.">Ms. (Madam)</option>
+        </select>
+      </div>
+      <div class="mb-2"><label class="fl">Full Name *</label><input type="text" name="name" class="fi" placeholder="e.g. Meena Joshi" required/></div>
+      <div class="mb-2"><label class="fl">Employee ID *</label><input type="text" name="employee_id" class="fi" placeholder="e.g. FAC001" required/></div>
+      <div class="mb-2"><label class="fl">Email *</label><input type="email" name="email" class="fi" placeholder="faculty@college.edu" required/></div>
+      <div class="mb-2"><label class="fl">Phone</label><input type="tel" name="phone" class="fi" placeholder="10-digit"/></div>
+      <div class="mb-2"><label class="fl">Password *</label><input type="password" name="password" class="fi" placeholder="Min 6 chars" required minlength="6"/></div>
+      <div class="mb-2">
+        <label class="fl">Department *</label>
+        <select name="dept" class="fi" required>
+          <option value="">Select Department</option>
+          {% for d in depts %}<option value="{{ d.name }}">{{ d.name }}</option>{% endfor %}
+        </select>
+      </div>
+    </div>
+  </div>
+
+  <div class="col-lg-6">
+    <div class="card">
+      <h6 class="mb-3" style="font-family:'Syne',sans-serif;font-weight:700;"><i class="bi bi-camera-fill me-2" style="color:var(--accent);"></i>Profile Photo <small style="color:var(--muted);font-weight:400;">(optional)</small></h6>
+      <div class="d-flex align-items-center gap-3 mb-3">
+        <div id="profPreview" style="width:72px;height:72px;border-radius:50%;background:var(--card2);border:2px dashed var(--border);display:flex;align-items:center;justify-content:center;overflow:hidden;flex-shrink:0;">
+          <i class="bi bi-person-fill" style="font-size:2rem;color:var(--muted);"></i>
+        </div>
+        <div>
+          <button type="button" onclick="openProfCam()" class="btn btn-s sm"><i class="bi bi-camera-fill"></i> Capture from Camera</button>
+          <div style="font-size:.72rem;color:var(--muted);margin-top:4px;">Or leave blank for default avatar</div>
+        </div>
+      </div>
+      <input type="hidden" name="profile_image" id="profImgInput"/>
+
+      <!-- Faculty Face for recognition (optional) -->
+      <h6 class="mb-2 mt-3" style="font-family:'Syne',sans-serif;font-weight:700;font-size:.9rem;"><i class="bi bi-person-bounding-box me-2" style="color:var(--warn);"></i>Face Data <small style="color:var(--muted);font-weight:400;">(for principal to mark faculty attendance)</small></h6>
+      <div class="cam-box mb-2" style="max-height:220px;">
+        <video id="video" autoplay muted playsinline></video>
+        <canvas id="snapCanvas" style="display:none;"></canvas>
+        <div class="cam-ov" id="camOverlay">
+          <i class="bi bi-camera-video-off" style="font-size:1.8rem;opacity:.4;"></i>
+          <span style="font-size:.8rem;">Optional: capture for attendance</span>
+        </div>
+        <div class="face-box" id="faceBox" style="display:none;"><span></span></div>
+        <div class="scan" id="scanLine" style="display:none;"></div>
+      </div>
+      <div class="d-flex gap-2 flex-wrap mb-1">
+        <button type="button" id="startBtn" class="btn btn-s sm"><i class="bi bi-camera-video-fill"></i> Start</button>
+        <button type="button" id="snapBtn" class="btn btn-g sm" style="display:none;"><i class="bi bi-camera-fill"></i> Capture</button>
+        <button type="button" id="stopBtn" class="btn btn-r sm" style="display:none;"><i class="bi bi-stop-fill"></i> Stop</button>
+      </div>
+      <div id="capStatus" style="font-size:.74rem;color:var(--muted);">0 face photo(s)</div>
+      <div class="thumbs" id="thumbs"></div>
+      <div id="hiddenFaces"></div>
+    </div>
+  </div>
+</div>
+
+<div class="card mt-3 d-flex justify-content-between align-items-center flex-wrap gap-2">
+  <div style="color:var(--muted);font-size:.82rem;"><i class="bi bi-info-circle me-1"></i>Faculty face data is used by Principal to mark faculty attendance via camera</div>
+  <div class="d-flex gap-2">
+    <a href="{{ url_for('admin_faculty') }}" class="btn btn-s sm"><i class="bi bi-x-lg"></i> Cancel</a>
+    <button type="submit" class="btn btn-p sm"><i class="bi bi-person-check-fill"></i> Add Faculty</button>
+  </div>
+</div>
+</form>
+
+<!-- Profile photo modal -->
+<div id="profModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.82);z-index:9999;align-items:center;justify-content:center;padding:14px;">
+  <div style="background:var(--card);border-radius:15px;padding:17px;width:100%;max-width:360px;border:1px solid var(--border);">
+    <div class="d-flex justify-content-between mb-2"><strong style="font-size:.9rem;">Profile Photo</strong>
+    <button onclick="closeProfCam()" style="background:none;border:none;color:var(--muted);font-size:1.2rem;cursor:pointer;"><i class="bi bi-x"></i></button></div>
+    <div class="cam-box mb-2"><video id="profVideo" autoplay muted playsinline></video><div class="cam-ov" id="profOv"><i class="bi bi-camera-video-off" style="font-size:2rem;opacity:.5;"></i></div></div>
+    <canvas id="profCanvas" style="display:none;"></canvas>
+    <button onclick="snapProf()" class="btn btn-p w-100 justify-content-center"><i class="bi bi-camera-fill"></i> Take Photo</button>
+  </div>
+</div>
+{% endblock %}
+
+{% block js %}
+<script src="{{ url_for('static',filename='js/cam.js') }}"></script>
+<script>
+let cam=null, profStream=null, faces=[];
+
+// Face camera
+document.getElementById('startBtn').addEventListener('click',async()=>{
+  cam=new FASCam({videoId:'video',canvasId:'snapCanvas',overlayId:'camOverlay',fboxId:'faceBox',scanId:'scanLine'});
+  if(await cam.start()){document.getElementById('startBtn').style.display='none';document.getElementById('snapBtn').style.display='';document.getElementById('stopBtn').style.display='';}
+});
+document.getElementById('stopBtn').addEventListener('click',()=>{cam&&cam.stop();cam=null;document.getElementById('startBtn').style.display='';document.getElementById('snapBtn').style.display='none';document.getElementById('stopBtn').style.display='none';});
+document.getElementById('snapBtn').addEventListener('click',()=>{
+  if(!cam||!cam.isActive()) return;
+  const url=cam.capture(); if(!url) return;
+  faces.push(url);
+  const img=document.createElement('img'); img.src=url; document.getElementById('thumbs').appendChild(img);
+  const inp=document.createElement('input'); inp.type='hidden'; inp.name='face_images[]'; inp.value=url; document.getElementById('hiddenFaces').appendChild(inp);
+  document.getElementById('capStatus').textContent=faces.length+' face photo(s) captured';
+  document.getElementById('capStatus').style.color=faces.length>=3?'#10b981':'var(--warn)';
+});
+
+// Profile photo
+function openProfCam(){
+  document.getElementById('profModal').style.display='flex';
+  navigator.mediaDevices.getUserMedia({video:{facingMode:'user'},audio:false}).then(s=>{profStream=s;document.getElementById('profVideo').srcObject=s;document.getElementById('profOv').style.display='none';}).catch(e=>alert('Camera: '+e.message));
+}
+function closeProfCam(){if(profStream){profStream.getTracks().forEach(t=>t.stop());profStream=null;}document.getElementById('profModal').style.display='none';}
+function snapProf(){
+  const v=document.getElementById('profVideo'),c=document.getElementById('profCanvas');
+  c.width=v.videoWidth||640;c.height=v.videoHeight||480;c.getContext('2d').drawImage(v,0,0);
+  const url=c.toDataURL('image/jpeg',.88);
+  document.getElementById('profImgInput').value=url;
+  document.getElementById('profPreview').innerHTML=`<img src="${url}" style="width:100%;height:100%;object-fit:cover;border-radius:50%;"/>`;
+  closeProfCam();
+}
+</script>
+{% endblock %}
+
+
+
+-------------------------------------------edit_principal.html-----------------------------------------------------------------------------
+{% extends 'base.html' %}
+{% block title %}Edit Student{% endblock %}
+{% block ptitle %}<i class="bi bi-pencil-fill me-2" style="color:var(--accent);"></i>Edit Student — {{ s.name }}{% endblock %}
+{% block content %}
+<form method="POST" id="eForm">
+<div class="row g-3">
+  <div class="col-lg-5">
+    <div class="card">
+      <h6 class="mb-3" style="font-family:'Syne',sans-serif;font-weight:700;"><i class="bi bi-person-vcard me-2" style="color:var(--primary);"></i>Student Details</h6>
+
+      <!-- Current photo -->
+      <div class="mb-3 text-center">
+        <div class="av-lg mx-auto mb-2">
+          {% if s.photo_path %}<img src="{{ url_for('static',filename=s.photo_path) }}" alt=""/>
+          {% else %}<i class="bi bi-person-fill"></i>{% endif %}
+        </div>
+        <span style="font-size:.75rem;color:var(--muted);">Current Photo</span>
+      </div>
+
+      <div class="mb-2"><label class="fl">Full Name *</label><input type="text" name="name" class="fi" value="{{ s.name }}" required/></div>
+      <div class="mb-2"><label class="fl">Email *</label><input type="email" name="email" class="fi" value="{{ s.email }}" required/></div>
+      <div class="mb-2"><label class="fl">Phone</label><input type="tel" name="phone" class="fi" value="{{ s.phone or '' }}"/></div>
+      <div class="mb-2">
+        <label class="fl">Department *</label>
+        <select name="dept" class="fi" id="deptSel" required>
+          {% for d in depts %}
+          <option value="{{ d.name }}" data-sems="{{ d.semesters }}" {% if d.name==s.dept %}selected{% endif %}>{{ d.name }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="mb-2">
+        <label class="fl">Semester *</label>
+        <div class="d-flex flex-wrap gap-2" id="semBtns">
+          {% set max_sem = depts|selectattr('name','equalto',s.dept)|map(attribute='semesters')|first|default(8) %}
+          {% for i in range(1, max_sem+1) %}
+          <button type="button" class="btn {% if i==s.semester %}btn-p{% else %}btn-s{% endif %} xs" onclick="setSem(this,{{i}})">Sem {{i}}</button>
+          {% endfor %}
+        </div>
+        <input type="hidden" name="semester" id="semVal" value="{{ s.semester }}"/>
+      </div>
+      <div class="mb-2">
+        <label class="fl">New Password <small style="color:var(--muted);">(leave blank to keep current)</small></label>
+        <input type="password" name="new_password" class="fi" placeholder="Enter new password"/>
+      </div>
+      <div class="mb-2">
+        <label class="fl">Status</label>
+        <select name="is_active" class="fi">
+          <option value="1" {% if s.is_active %}selected{% endif %}>Active</option>
+          <option value="0" {% if not s.is_active %}selected{% endif %}>Inactive</option>
+        </select>
+      </div>
+      <div style="font-size:.75rem;color:var(--muted);margin-top:6px;">
+        <i class="bi bi-person-bounding-box me-1"></i>Face: {% if s.face_encoding %}<span style="color:#10b981;">✔ Enrolled</span>{% else %}<span style="color:#ef4444;">✗ Not enrolled</span>{% endif %}
+      </div>
+    </div>
+  </div>
+
+  <!-- Re-enroll Face (optional) -->
+  <div class="col-lg-7">
+    <div class="card">
+      <h6 class="mb-3" style="font-family:'Syne',sans-serif;font-weight:700;"><i class="bi bi-arrow-repeat me-2" style="color:var(--accent);"></i>Re-enroll Face <small style="color:var(--muted);font-weight:400;">(optional — only if replacing)</small></h6>
+      <div class="cam-box mb-3">
+        <video id="video" autoplay muted playsinline></video>
+        <canvas id="snapCanvas" style="display:none;"></canvas>
+        <div class="cam-ov" id="camOverlay">
+          <i class="bi bi-camera-video-off" style="font-size:2.2rem;opacity:.4;"></i>
+          <span style="font-size:.85rem;">Start camera to capture new face</span>
+        </div>
+        <div class="face-box" id="faceBox" style="display:none;"><span></span></div>
+        <div class="scan" id="scanLine" style="display:none;"></div>
+      </div>
+      <div class="d-flex gap-2 flex-wrap mb-2">
+        <button type="button" id="startBtn" class="btn btn-s sm"><i class="bi bi-camera-video-fill"></i> Start Camera</button>
+        <button type="button" id="snapBtn" class="btn btn-g sm" style="display:none;"><i class="bi bi-camera-fill"></i> Capture</button>
+        <button type="button" id="stopBtn" class="btn btn-r sm" style="display:none;"><i class="bi bi-stop-fill"></i> Stop</button>
+      </div>
+      <div id="capStatus" style="font-size:.78rem;color:var(--muted);">0 new photo(s) — leave empty to keep existing face data</div>
+      <div class="thumbs" id="thumbs"></div>
+      <div id="hiddenFaces"></div>
+    </div>
+  </div>
+</div>
+
+<div class="card mt-3 d-flex justify-content-between align-items-center flex-wrap gap-2">
+  <div style="color:var(--muted);font-size:.82rem;"><i class="bi bi-info-circle me-1"></i>Face re-enrollment only updates if new photos are captured</div>
+  <div class="d-flex gap-2">
+    <a href="{{ url_for('admin_students') }}" class="btn btn-s sm"><i class="bi bi-x-lg"></i> Cancel</a>
+    <button type="submit" class="btn btn-p sm"><i class="bi bi-check2-circle"></i> Save Changes</button>
+  </div>
+</div>
+</form>
+{% endblock %}
+
+{% block js %}
+<script src="{{ url_for('static',filename='js/cam.js') }}"></script>
+<script>
+let cam=null, faces=[];
+function setSem(btn,i){
+  document.querySelectorAll('#semBtns .btn').forEach(b=>b.className='btn btn-s xs');
+  btn.className='btn btn-p xs';
+  document.getElementById('semVal').value=i;
+}
+document.getElementById('deptSel').addEventListener('change',function(){
+  const sems=parseInt(this.selectedOptions[0]?.dataset.sems||8);
+  const wrap=document.getElementById('semBtns'); wrap.innerHTML='';
+  for(let i=1;i<=sems;i++){
+    const b=document.createElement('button'); b.type='button';
+    b.className='btn '+(i===1?'btn-p':'btn-s')+' xs'; b.textContent='Sem '+i;
+    b.onclick=function(){setSem(this,i);};
+    wrap.appendChild(b);
+  }
+  document.getElementById('semVal').value=1;
+});
+document.getElementById('startBtn').addEventListener('click',async()=>{
+  cam=new FASCam({videoId:'video',canvasId:'snapCanvas',overlayId:'camOverlay',fboxId:'faceBox',scanId:'scanLine'});
+  if(await cam.start()){
+    document.getElementById('startBtn').style.display='none';
+    document.getElementById('snapBtn').style.display='';
+    document.getElementById('stopBtn').style.display='';
+  }
+});
+document.getElementById('stopBtn').addEventListener('click',()=>{cam&&cam.stop();cam=null;document.getElementById('startBtn').style.display='';document.getElementById('snapBtn').style.display='none';document.getElementById('stopBtn').style.display='none';});
+document.getElementById('snapBtn').addEventListener('click',()=>{
+  if(!cam||!cam.isActive()) return;
+  const url=cam.capture(); if(!url) return;
+  faces.push(url);
+  const img=document.createElement('img'); img.src=url; document.getElementById('thumbs').appendChild(img);
+  const inp=document.createElement('input'); inp.type='hidden'; inp.name='face_images[]'; inp.value=url; document.getElementById('hiddenFaces').appendChild(inp);
+  const st=document.getElementById('capStatus'); st.textContent=`${faces.length} new photo(s) captured`; st.style.color=faces.length>=3?'#10b981':'var(--warn)';
+});
+</script>
+{% endblock %}
+
+
+
+-------------------------------------------edit_student.html-----------------------------------------------------------------------------
+
+{% extends 'base.html' %}
+{% block title %}Edit Student{% endblock %}
+{% block ptitle %}<i class="bi bi-pencil-fill me-2" style="color:var(--accent);"></i>Edit Student — {{ s.name }}{% endblock %}
+{% block content %}
+<form method="POST" id="eForm">
+<div class="row g-3">
+  <div class="col-lg-5">
+    <div class="card">
+      <h6 class="mb-3" style="font-family:'Syne',sans-serif;font-weight:700;"><i class="bi bi-person-vcard me-2" style="color:var(--primary);"></i>Student Details</h6>
+
+      <!-- Current photo -->
+      <div class="mb-3 text-center">
+        <div class="av-lg mx-auto mb-2">
+          {% if s.photo_path %}<img src="{{ url_for('static',filename=s.photo_path) }}" alt=""/>
+          {% else %}<i class="bi bi-person-fill"></i>{% endif %}
+        </div>
+        <span style="font-size:.75rem;color:var(--muted);">Current Photo</span>
+      </div>
+
+      <div class="mb-2"><label class="fl">Full Name *</label><input type="text" name="name" class="fi" value="{{ s.name }}" required/></div>
+      <div class="mb-2"><label class="fl">Email *</label><input type="email" name="email" class="fi" value="{{ s.email }}" required/></div>
+      <div class="mb-2"><label class="fl">Phone</label><input type="tel" name="phone" class="fi" value="{{ s.phone or '' }}"/></div>
+      <div class="mb-2">
+        <label class="fl">Department *</label>
+        <select name="dept" class="fi" id="deptSel" required>
+          {% for d in depts %}
+          <option value="{{ d.name }}" data-sems="{{ d.semesters }}" {% if d.name==s.dept %}selected{% endif %}>{{ d.name }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="mb-2">
+        <label class="fl">Semester *</label>
+        <div class="d-flex flex-wrap gap-2" id="semBtns">
+          {% set max_sem = depts|selectattr('name','equalto',s.dept)|map(attribute='semesters')|first|default(8) %}
+          {% for i in range(1, max_sem+1) %}
+          <button type="button" class="btn {% if i==s.semester %}btn-p{% else %}btn-s{% endif %} xs" onclick="setSem(this,{{i}})">Sem {{i}}</button>
+          {% endfor %}
+        </div>
+        <input type="hidden" name="semester" id="semVal" value="{{ s.semester }}"/>
+      </div>
+      <div class="mb-2">
+        <label class="fl">New Password <small style="color:var(--muted);">(leave blank to keep current)</small></label>
+        <input type="password" name="new_password" class="fi" placeholder="Enter new password"/>
+      </div>
+      <div class="mb-2">
+        <label class="fl">Status</label>
+        <select name="is_active" class="fi">
+          <option value="1" {% if s.is_active %}selected{% endif %}>Active</option>
+          <option value="0" {% if not s.is_active %}selected{% endif %}>Inactive</option>
+        </select>
+      </div>
+      <div style="font-size:.75rem;color:var(--muted);margin-top:6px;">
+        <i class="bi bi-person-bounding-box me-1"></i>Face: {% if s.face_encoding %}<span style="color:#10b981;">✔ Enrolled</span>{% else %}<span style="color:#ef4444;">✗ Not enrolled</span>{% endif %}
+      </div>
+    </div>
+  </div>
+
+  <!-- Re-enroll Face (optional) -->
+  <div class="col-lg-7">
+    <div class="card">
+      <h6 class="mb-3" style="font-family:'Syne',sans-serif;font-weight:700;"><i class="bi bi-arrow-repeat me-2" style="color:var(--accent);"></i>Re-enroll Face <small style="color:var(--muted);font-weight:400;">(optional — only if replacing)</small></h6>
+      <div class="cam-box mb-3">
+        <video id="video" autoplay muted playsinline></video>
+        <canvas id="snapCanvas" style="display:none;"></canvas>
+        <div class="cam-ov" id="camOverlay">
+          <i class="bi bi-camera-video-off" style="font-size:2.2rem;opacity:.4;"></i>
+          <span style="font-size:.85rem;">Start camera to capture new face</span>
+        </div>
+        <div class="face-box" id="faceBox" style="display:none;"><span></span></div>
+        <div class="scan" id="scanLine" style="display:none;"></div>
+      </div>
+      <div class="d-flex gap-2 flex-wrap mb-2">
+        <button type="button" id="startBtn" class="btn btn-s sm"><i class="bi bi-camera-video-fill"></i> Start Camera</button>
+        <button type="button" id="snapBtn" class="btn btn-g sm" style="display:none;"><i class="bi bi-camera-fill"></i> Capture</button>
+        <button type="button" id="stopBtn" class="btn btn-r sm" style="display:none;"><i class="bi bi-stop-fill"></i> Stop</button>
+      </div>
+      <div id="capStatus" style="font-size:.78rem;color:var(--muted);">0 new photo(s) — leave empty to keep existing face data</div>
+      <div class="thumbs" id="thumbs"></div>
+      <div id="hiddenFaces"></div>
+    </div>
+  </div>
+</div>
+
+<div class="card mt-3 d-flex justify-content-between align-items-center flex-wrap gap-2">
+  <div style="color:var(--muted);font-size:.82rem;"><i class="bi bi-info-circle me-1"></i>Face re-enrollment only updates if new photos are captured</div>
+  <div class="d-flex gap-2">
+    <a href="{{ url_for('admin_students') }}" class="btn btn-s sm"><i class="bi bi-x-lg"></i> Cancel</a>
+    <button type="submit" class="btn btn-p sm"><i class="bi bi-check2-circle"></i> Save Changes</button>
+  </div>
+</div>
+</form>
+{% endblock %}
+
+{% block js %}
+<script src="{{ url_for('static',filename='js/cam.js') }}"></script>
+<script>
+let cam=null, faces=[];
+function setSem(btn,i){
+  document.querySelectorAll('#semBtns .btn').forEach(b=>b.className='btn btn-s xs');
+  btn.className='btn btn-p xs';
+  document.getElementById('semVal').value=i;
+}
+document.getElementById('deptSel').addEventListener('change',function(){
+  const sems=parseInt(this.selectedOptions[0]?.dataset.sems||8);
+  const wrap=document.getElementById('semBtns'); wrap.innerHTML='';
+  for(let i=1;i<=sems;i++){
+    const b=document.createElement('button'); b.type='button';
+    b.className='btn '+(i===1?'btn-p':'btn-s')+' xs'; b.textContent='Sem '+i;
+    b.onclick=function(){setSem(this,i);};
+    wrap.appendChild(b);
+  }
+  document.getElementById('semVal').value=1;
+});
+document.getElementById('startBtn').addEventListener('click',async()=>{
+  cam=new FASCam({videoId:'video',canvasId:'snapCanvas',overlayId:'camOverlay',fboxId:'faceBox',scanId:'scanLine'});
+  if(await cam.start()){
+    document.getElementById('startBtn').style.display='none';
+    document.getElementById('snapBtn').style.display='';
+    document.getElementById('stopBtn').style.display='';
+  }
+});
+document.getElementById('stopBtn').addEventListener('click',()=>{cam&&cam.stop();cam=null;document.getElementById('startBtn').style.display='';document.getElementById('snapBtn').style.display='none';document.getElementById('stopBtn').style.display='none';});
+document.getElementById('snapBtn').addEventListener('click',()=>{
+  if(!cam||!cam.isActive()) return;
+  const url=cam.capture(); if(!url) return;
+  faces.push(url);
+  const img=document.createElement('img'); img.src=url; document.getElementById('thumbs').appendChild(img);
+  const inp=document.createElement('input'); inp.type='hidden'; inp.name='face_images[]'; inp.value=url; document.getElementById('hiddenFaces').appendChild(inp);
+  const st=document.getElementById('capStatus'); st.textContent=`${faces.length} new photo(s) captured`; st.style.color=faces.length>=3?'#10b981':'var(--warn)';
+});
+</script>
+{% endblock %}
+
+
+-------------------------------------------faculty.html-----------------------------------------------------------------------------
+{% extends 'base.html' %}
+{% block title %}Manage Faculty{% endblock %}
+{% block ptitle %}<i class="bi bi-person-badge-fill me-2" style="color:var(--accent);"></i>Manage Faculty (Admin){% endblock %}
+{% block content %}
+<div class="d-flex justify-content-between mb-3 flex-wrap gap-2">
+  <span style="color:var(--muted);font-size:.82rem;">{{ faculty|length }} faculty member(s)</span>
+  <a href="{{ url_for('admin_add_faculty') }}" class="btn btn-p sm"><i class="bi bi-person-plus-fill"></i> Add Faculty</a>
+</div>
+<div class="card mb-2"><input class="fi" placeholder="🔍 Search by name, dept, employee ID…" oninput="filt(this.value)"/></div>
+<!-- Mobile cards -->
+<div class="d-block d-md-none">
+  {% for f in faculty %}
+  <div class="card mb-2">
+    <div class="d-flex align-items-center gap-3">
+      <div class="av" style="width:48px;height:48px;">{% if f.photo_path %}<img src="{{ url_for('static',filename=f.photo_path) }}" alt=""/>{% else %}<i class="bi bi-person-fill"></i>{% endif %}</div>
+      <div style="flex:1;">
+        <div style="font-weight:700;">{{ f.title }} {{ f.name }}</div>
+        <div style="font-size:.74rem;color:var(--muted);">{{ f.employee_id }} · {{ f.dept }}</div>
+        <div style="font-size:.72rem;color:var(--muted);">{{ f.email }}</div>
+      </div>
+      <div class="d-flex flex-column gap-1 align-items-end">
+        {% if f.is_active %}<span class="b-ok">Active</span>{% else %}<span class="b-no">Inactive</span>{% endif %}
+        <div class="d-flex gap-1 mt-1">
+          <a href="{{ url_for('admin_edit_faculty',fid=f.id) }}" class="btn btn-s xs"><i class="bi bi-pencil-fill"></i></a>
+          <form method="POST" action="{{ url_for('admin_delete_faculty',fid=f.id) }}" onsubmit="return confirm('Delete {{ f.title }} {{ f.name }}?')">
+            <button type="submit" class="btn btn-r xs"><i class="bi bi-trash3-fill"></i></button>
+          </form>
+        </div>
+      </div>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+<!-- Desktop table -->
+<div class="card d-none d-md-block">
+  <div class="table-responsive">
+    <table class="tbl" id="fTbl">
+      <thead><tr><th>#</th><th>Photo</th><th>Title</th><th>Name</th><th>Emp ID</th><th>Department</th><th>Email</th><th>Phone</th><th>Status</th><th>Actions</th></tr></thead>
+      <tbody>{% for f in faculty %}
+      <tr>
+        <td style="color:var(--muted);">{{ loop.index }}</td>
+        <td><div class="av">{% if f.photo_path %}<img src="{{ url_for('static',filename=f.photo_path) }}" alt=""/>{% else %}<i class="bi bi-person-fill"></i>{% endif %}</div></td>
+        <td><span class="b-pur">{{ f.title }}</span></td>
+        <td><strong>{{ f.name }}</strong></td>
+        <td style="font-size:.78rem;">{{ f.employee_id }}</td>
+        <td><span class="b-blue">{{ f.dept }}</span></td>
+        <td style="color:var(--muted);font-size:.76rem;">{{ f.email }}</td>
+        <td style="color:var(--muted);font-size:.76rem;">{{ f.phone or '—' }}</td>
+        <td>{% if f.is_active %}<span class="b-ok">Active</span>{% else %}<span class="b-no">Inactive</span>{% endif %}</td>
+        <td>
+          <a href="{{ url_for('admin_edit_faculty',fid=f.id) }}" class="btn btn-s xs me-1"><i class="bi bi-pencil-fill"></i> Edit</a>
+          <form method="POST" action="{{ url_for('admin_delete_faculty',fid=f.id) }}" style="display:inline;" onsubmit="return confirm('Delete {{ f.title }} {{ f.name }}? This cannot be undone.')">
+            <button type="submit" class="btn btn-r xs"><i class="bi bi-trash3-fill"></i> Delete</button>
+          </form>
+        </td>
+      </tr>
+      {% else %}<tr><td colspan="10" class="text-center" style="color:var(--muted);padding:28px;">No faculty found.</td></tr>{% endfor %}</tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}
+{% block js %}<script>function filt(q){q=q.toLowerCase();document.querySelectorAll('#fTbl tbody tr').forEach(r=>{r.style.display=r.textContent.toLowerCase().includes(q)?'':'none';});}</script>{% endblock %}
+
+-----------------------------------principal.html---------------------------------------------------------------------------------
+
+{% extends 'base.html' %}
+{% block title %}Manage Principals{% endblock %}
+{% block ptitle %}<i class="bi bi-building-fill me-2" style="color:var(--accent);"></i>Manage Principals (Admin){% endblock %}
+{% block content %}
+<div class="d-flex justify-content-between mb-3 flex-wrap gap-2">
+  <span style="color:var(--muted);font-size:.82rem;">{{ principals|length }} principal(s)</span>
+  <a href="{{ url_for('admin_add_principal') }}" class="btn btn-p sm"><i class="bi bi-person-plus-fill"></i> Add Principal</a>
+</div>
+<div class="card mb-2"><input class="fi" placeholder="🔍 Search…" oninput="filt(this.value)"/></div>
+<!-- Mobile -->
+<div class="d-block d-md-none">
+  {% for p in principals %}
+  <div class="card mb-2">
+    <div class="d-flex align-items-center gap-3">
+      <div class="av" style="width:48px;height:48px;">{% if p.photo_path %}<img src="{{ url_for('static',filename=p.photo_path) }}" alt=""/>{% else %}<i class="bi bi-person-fill"></i>{% endif %}</div>
+      <div style="flex:1;">
+        <div style="font-weight:700;">{{ p.name }}</div>
+        <div style="font-size:.74rem;color:var(--muted);">{{ p.employee_id }}{% if p.dept %} · {{ p.dept }}{% endif %}</div>
+        <div style="font-size:.72rem;color:var(--muted);">{{ p.email }}</div>
+      </div>
+      <div class="d-flex flex-column gap-1 align-items-end">
+        {% if p.is_active %}<span class="b-ok">Active</span>{% else %}<span class="b-no">Inactive</span>{% endif %}
+        <div class="d-flex gap-1 mt-1">
+          <a href="{{ url_for('admin_edit_principal',pid=p.id) }}" class="btn btn-s xs"><i class="bi bi-pencil-fill"></i></a>
+          <form method="POST" action="{{ url_for('admin_delete_principal',pid=p.id) }}" onsubmit="return confirm('Delete {{ p.name }}?')">
+            <button type="submit" class="btn btn-r xs"><i class="bi bi-trash3-fill"></i></button>
+          </form>
+        </div>
+      </div>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+<!-- Desktop -->
+<div class="card d-none d-md-block">
+  <div class="table-responsive">
+    <table class="tbl" id="pTbl">
+      <thead><tr><th>#</th><th>Photo</th><th>Name</th><th>Emp ID</th><th>Dept</th><th>Email</th><th>Phone</th><th>Status</th><th>Actions</th></tr></thead>
+      <tbody>{% for p in principals %}
+      <tr>
+        <td style="color:var(--muted);">{{ loop.index }}</td>
+        <td><div class="av">{% if p.photo_path %}<img src="{{ url_for('static',filename=p.photo_path) }}" alt=""/>{% else %}<i class="bi bi-person-fill"></i>{% endif %}</div></td>
+        <td><strong>{{ p.name }}</strong></td>
+        <td style="font-size:.78rem;">{{ p.employee_id }}</td>
+        <td style="font-size:.78rem;">{{ p.dept or '—' }}</td>
+        <td style="color:var(--muted);font-size:.76rem;">{{ p.email }}</td>
+        <td style="color:var(--muted);font-size:.76rem;">{{ p.phone or '—' }}</td>
+        <td>{% if p.is_active %}<span class="b-ok">Active</span>{% else %}<span class="b-no">Inactive</span>{% endif %}</td>
+        <td>
+          <a href="{{ url_for('admin_edit_principal',pid=p.id) }}" class="btn btn-s xs me-1"><i class="bi bi-pencil-fill"></i> Edit</a>
+          <form method="POST" action="{{ url_for('admin_delete_principal',pid=p.id) }}" style="display:inline;" onsubmit="return confirm('Delete {{ p.name }}?')">
+            <button type="submit" class="btn btn-r xs"><i class="bi bi-trash3-fill"></i> Delete</button>
+          </form>
+        </td>
+      </tr>
+      {% else %}<tr><td colspan="9" class="text-center" style="color:var(--muted);padding:28px;">No principals found.</td></tr>{% endfor %}</tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}
+{% block js %}<script>function filt(q){q=q.toLowerCase();document.querySelectorAll('#pTbl tbody tr').forEach(r=>{r.style.display=r.textContent.toLowerCase().includes(q)?'':'none';});}</script>{% endblock %}
+
+
+-----------------------------------students.html---------------------------------------------------------------------------------
+<!-- ════ admin/students.html ════ -->
+{% extends 'base.html' %}
+{% block title %}Manage Students{% endblock %}
+{% block ptitle %}<i class="bi bi-people-fill me-2" style="color:var(--accent);"></i>Manage Students (Admin){% endblock %}
+{% block content %}
+<div class="d-flex justify-content-between mb-3 flex-wrap gap-2">
+  <form method="GET" class="d-flex gap-2 flex-wrap">
+    <select name="dept" class="fi" style="width:auto;"><option value="">All Depts</option>{% for d in depts %}<option value="{{ d }}" {% if d==sel_dept %}selected{% endif %}>{{ d }}</option>{% endfor %}</select>
+    <select name="sem" class="fi" style="width:auto;"><option value="">All Sems</option>{% for i in range(1,11) %}<option value="{{ i }}" {% if i|string==sel_sem %}selected{% endif %}>Sem {{ i }}</option>{% endfor %}</select>
+    <button type="submit" class="btn btn-s sm"><i class="bi bi-funnel-fill"></i> Filter</button>
+  </form>
+  <a href="{{ url_for('admin_add_student') }}" class="btn btn-p sm"><i class="bi bi-person-plus-fill"></i> Add Student</a>
+</div>
+<div class="card mb-2"><input class="fi" placeholder="🔍 Search…" oninput="filt(this.value)"/></div>
+<div class="card"><div class="table-responsive">
+  <table class="tbl" id="t">
+    <thead><tr><th>#</th><th>Photo</th><th>Name</th><th>Roll No</th><th>Dept</th><th>Sem</th><th>Email</th><th>Face</th><th>Active</th><th>Actions</th></tr></thead>
+    <tbody>{% for s in students %}<tr>
+      <td style="color:var(--muted);">{{ loop.index }}</td>
+      <td><div class="av">{% if s.photo_path %}<img src="{{ url_for('static',filename=s.photo_path) }}" alt=""/>{% else %}<i class="bi bi-person-fill"></i>{% endif %}</div></td>
+      <td><strong>{{ s.name }}</strong></td><td><span class="b-blue">{{ s.roll_no }}</span></td>
+      <td style="font-size:.78rem;">{{ s.dept }}</td><td><span class="b-warn">{{ s.semester }}</span></td>
+      <td style="color:var(--muted);font-size:.76rem;">{{ s.email }}</td>
+      <td>{% if s.face_encoding %}<span class="b-ok">✔</span>{% else %}<span class="b-no">✗</span>{% endif %}</td>
+      <td>{% if s.is_active %}<span class="b-ok">Yes</span>{% else %}<span class="b-no">No</span>{% endif %}</td>
+      <td>
+        <a href="{{ url_for('admin_edit_student',sid=s.id) }}" class="btn btn-s xs"><i class="bi bi-pencil-fill"></i></a>
+        <form method="POST" action="{{ url_for('admin_delete_student',sid=s.id) }}" style="display:inline;" onsubmit="return confirm('Delete {{ s.name }}?')">
+          <button type="submit" class="btn btn-r xs"><i class="bi bi-trash3-fill"></i></button>
+        </form>
+      </td>
+    </tr>{% else %}<tr><td colspan="10" class="text-center" style="color:var(--muted);padding:28px;">No students found.</td></tr>{% endfor %}</tbody>
+  </table>
+</div></div>
+{% endblock %}
+{% block js %}<script>function filt(q){q=q.toLowerCase();document.querySelectorAll('#t tbody tr').forEach(r=>{r.style.display=r.textContent.toLowerCase().includes(q)?'':'none';});}</script>{% endblock %}
+
+
+-----------------------------------attendance.html---------------------------------------------------------------------------------
+{% extends 'base.html' %}
+{% block title %}Attendance Records{% endblock %}
+{% block ptitle %}<i class="bi bi-calendar-check-fill me-2" style="color:var(--accent);"></i>
+  {% if session.role=='student' %}My Attendance{% else %}Student Attendance Records{% endif %}
+{% endblock %}
+{% block content %}
+<!-- Filters -->
+<div class="card mb-3">
+  <form method="GET" class="row g-2 align-items-end">
+    <div class="col-6 col-md-3">
+      <label class="fl">Date</label>
+      <input type="date" name="date" value="{{ date_f }}" class="fi"/>
+    </div>
+    {% if session.role in ['admin','principal'] %}
+    <div class="col-6 col-md-3">
+      <label class="fl">Department</label>
+      <select name="dept" class="fi">
+        <option value="">All Depts</option>
+        {% for d in depts %}<option value="{{ d }}" {% if d==dept_f %}selected{% endif %}>{{ d }}</option>{% endfor %}
+      </select>
+    </div>
+    {% endif %}
+    {% if session.role in ['admin','principal','faculty'] %}
+    <div class="col-6 col-md-2">
+      <label class="fl">Semester</label>
+      <select name="sem" class="fi">
+        <option value="">All</option>
+        {% for i in range(1,11) %}<option value="{{ i }}" {% if sem_f==i|string %}selected{% endif %}>Sem {{ i }}</option>{% endfor %}
+      </select>
+    </div>
+    {% endif %}
+    <div class="col-6 col-md-2">
+      <button type="submit" class="btn btn-p w-100 justify-content-center sm"><i class="bi bi-funnel-fill"></i> Filter</button>
+    </div>
+    <div class="col-6 col-md-1">
+      <a href="{{ url_for('attendance') }}" class="btn btn-s w-100 justify-content-center sm"><i class="bi bi-x"></i></a>
+    </div>
+    {% if session.role != 'student' %}
+    <div class="col-6 col-md-auto">
+      <a href="{{ url_for('download_csv',date=date_f,dept=dept_f,sem=sem_f) }}" class="btn btn-g sm">
+        <i class="bi bi-download"></i> CSV
+      </a>
+    </div>
+    {% endif %}
+  </form>
+</div>
+
+<!-- Mobile card view -->
+<div class="d-block d-md-none">
+  {% for r in records %}
+  <div class="card mb-2">
+    <div class="d-flex align-items-center gap-3">
+      {% if r.photo_path is defined %}
+      <div class="av">{% if r.photo_path %}<img src="{{ url_for('static',filename=r.photo_path) }}" alt=""/>{% else %}<i class="bi bi-person-fill"></i>{% endif %}</div>
+      <div style="flex:1;">
+        <div style="font-weight:700;">{{ r.name }}</div>
+        <div style="font-size:.74rem;color:var(--muted);">{{ r.roll_no }} · {{ r.dept }} · Sem {{ r.semester }}</div>
+        <div style="font-size:.72rem;color:var(--muted);">{{ r.timestamp.strftime('%d %b %Y, %I:%M %p') }}</div>
+      </div>
+      {% else %}
+      <div style="flex:1;">
+        <div style="font-size:.78rem;color:var(--muted);">{{ r.timestamp.strftime('%d %b %Y, %I:%M %p') }}</div>
+      </div>
+      {% endif %}
+      <div class="text-end">
+        <span class="b-ok">{{ r.status }}</span>
+        {% if r.confidence %}<div style="font-size:.74rem;color:var(--success);font-weight:700;margin-top:2px;">{{ "%.0f"|format(r.confidence) }}%</div>{% endif %}
+      </div>
+    </div>
+  </div>
+  {% else %}
+  <div class="card text-center" style="color:var(--muted);padding:36px;">No records found.</div>
+  {% endfor %}
+</div>
+
+<!-- Desktop table -->
+<div class="card d-none d-md-block">
+  <div class="d-flex justify-content-between mb-3 flex-wrap gap-2 align-items-center">
+    <span style="color:var(--muted);font-size:.82rem;">{{ records|length }} record(s)</span>
+    {% if session.role != 'student' %}
+    <a href="{{ url_for('download_csv',date=date_f,dept=dept_f,sem=sem_f) }}" class="btn btn-g sm">
+      <i class="bi bi-file-earmark-spreadsheet"></i> Download CSV
+    </a>
+    {% endif %}
+  </div>
+  <div class="table-responsive">
+    <table class="tbl">
+      <thead>
+        <tr>
+          <th>#</th>
+          {% if session.role!='student' %}<th>Photo</th><th>Name</th><th>Roll No</th><th>Dept</th><th>Sem</th>{% endif %}
+          <th>Status</th><th>Confidence</th><th>Date & Time</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in records %}
+        <tr>
+          <td style="color:var(--muted);">{{ loop.index }}</td>
+          {% if session.role!='student' %}
+          <td><div class="av">{% if r.photo_path %}<img src="{{ url_for('static',filename=r.photo_path) }}" alt=""/>{% else %}<i class="bi bi-person-fill"></i>{% endif %}</div></td>
+          <td><strong>{{ r.name }}</strong></td>
+          <td><span class="b-blue">{{ r.roll_no }}</span></td>
+          <td style="font-size:.8rem;">{{ r.dept }}</td>
+          <td><span class="b-warn">{{ r.semester }}</span></td>
+          {% endif %}
+          <td><span class="b-ok">{{ r.status }}</span></td>
+          <td>
+            {% if r.confidence %}
+            <div style="min-width:65px;"><div class="cbar mb-1"><div class="cfill" style="width:{{ [r.confidence,100]|min }}%;"></div></div>
+            <span style="font-size:.74rem;color:var(--muted);">{{ "%.1f"|format(r.confidence) }}%</span></div>
+            {% else %}—{% endif %}
+          </td>
+          <td style="color:var(--muted);font-size:.78rem;white-space:nowrap;">{{ r.timestamp.strftime('%d %b %Y, %I:%M:%S %p') }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="9" class="text-center" style="color:var(--muted);padding:28px;">No records found.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}
+
+
+
+
+-----------------------------------base.html---------------------------------------------------------------------------------
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1"/>
+  <meta name="theme-color" content="#0f1c2e"/>
+  <title>{% block title %}FAS{% endblock %} | Face Attendance</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet"/>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet"/>
+  <link href="{{ url_for('static',filename='css/style.css') }}" rel="stylesheet"/>
+  {% block head %}{% endblock %}
+</head>
+<body>
+{% if session.uid %}
+<div class="ov" id="ov"></div>
+<!-- ── Sidebar ─────────────────────────────────── -->
+<aside class="sidebar" id="sb">
+  <div class="sb-brand">
+    <div class="sb-logo"><i class="bi bi-person-bounding-box text-white"></i></div>
+    <div><div class="sb-title">FaceAttend</div><div class="sb-sub">Smart System using Face Recognition</div></div>
+  </div>
+  <nav class="sb-nav">
+    <a href="{{ url_for('dashboard') }}" class="nav-a {% if req=='dashboard' %}on{% endif %}">
+      <i class="bi bi-grid-1x2-fill"></i><span>Dashboard</span>
+    </a>
+
+    {% if session.role in ['admin','faculty','principal'] %}
+    <div class="sb-label">Attendance</div>
+    <a href="{{ url_for('mark') }}" class="nav-a {% if req=='mark' %}on{% endif %}">
+      <i class="bi bi-camera-video-fill"></i><span>
+        {% if session.role=='principal' %}Mark Faculty{% else %}Mark Attendance{% endif %}
+      </span>
+    </a>
+    {% endif %}
+
+    {% if session.role in ['admin','faculty','principal'] %}
+    <a href="{{ url_for('students') }}" class="nav-a {% if req=='students' %}on{% endif %}">
+      <i class="bi bi-mortarboard-fill"></i><span>Students</span>
+    </a>
+    {% endif %}
+
+    {% if session.role in ['admin','principal'] %}
+    <a href="{{ url_for('faculty_list') }}" class="nav-a {% if req=='faculty_list' %}on{% endif %}">
+      <i class="bi bi-person-workspace"></i><span>Faculty</span>
+    </a>
+    <a href="{{ url_for('faculty_attendance') }}" class="nav-a {% if req=='faculty_attendance' %}on{% endif %}">
+      <i class="bi bi-calendar2-check-fill"></i><span>Faculty Records</span>
+    </a>
+    {% endif %}
+
+    <a href="{{ url_for('attendance') }}" class="nav-a {% if req=='attendance' %}on{% endif %}">
+      <i class="bi bi-calendar-check-fill"></i><span>
+        {% if session.role=='student' %}My Attendance{% else %}Student Records{% endif %}
+      </span>
+    </a>
+
+    {% if session.role in ['admin','faculty','principal'] %}
+    <a href="{{ url_for('reports') }}" class="nav-a {% if req=='reports' %}on{% endif %}">
+      <i class="bi bi-bar-chart-fill"></i><span>Reports</span>
+    </a>
+    {% endif %}
+
+    {% if session.role=='admin' %}
+    <div class="sb-label">Admin Panel</div>
+    <a href="{{ url_for('admin_students') }}" class="nav-a {% if 'admin_student' in req %}on{% endif %}">
+      <i class="bi bi-people-fill"></i><span>Manage Students</span>
+    </a>
+    <a href="{{ url_for('admin_faculty') }}" class="nav-a {% if 'admin_faculty' in req %}on{% endif %}">
+      <i class="bi bi-person-badge-fill"></i><span>Manage Faculty</span>
+    </a>
+    <a href="{{ url_for('admin_principals') }}" class="nav-a {% if 'admin_principal' in req %}on{% endif %}">
+      <i class="bi bi-building-fill"></i><span>Manage Principals</span>
+    </a>
+    {% endif %}
+
+    <div class="sb-label">Account</div>
+    <a href="{{ url_for('profile') }}" class="nav-a {% if req=='profile' %}on{% endif %}">
+      <i class="bi bi-person-circle"></i><span>My Profile</span>
+    </a>
+  </nav>
+
+  <div class="sb-foot">
+    <div class="sb-user">
+      <div class="sb-av">
+        {% if session.photo %}<img src="{{ url_for('static',filename=session.photo) }}" alt=""/>
+        {% else %}<i class="bi bi-person-fill"></i>{% endif %}
+      </div>
+      <div style="flex:1;min-width:0;">
+        <div class="sb-uname">{{ session.name }}</div>
+        <span class="sb-role r-{{ session.role }}">{{ session.role|title }}</span>
+      </div>
+    </div>
+    <div class="sb-acts mt-2">
+      <a href="{{ url_for('switch') }}" class="sb-btn" title="Switch Account">
+        <i class="bi bi-arrow-left-right"></i><span>Switch</span>
+      </a>
+      <a href="{{ url_for('logout') }}" class="sb-btn red" title="Logout">
+        <i class="bi bi-box-arrow-right"></i><span>Logout</span>
+      </a>
+    </div>
+  </div>
+</aside>
+
+<!-- ── Main ────────────────────────────────────── -->
+<div class="main" id="main">
+  <header class="topbar">
+    <button class="tog" id="tog"><i class="bi bi-list"></i></button>
+    <div class="tb-title">{% block ptitle %}{% endblock %}</div>
+    <div class="tb-right">
+      <span class="clk hide-m"><i class="bi bi-calendar3"></i> <span id="clkD"></span></span>
+      <span class="clk"><i class="bi bi-clock"></i> <span id="clkT"></span></span>
+    </div>
+  </header>
+
+  <div class="px-3 pt-2">
+    {% with msgs=get_flashed_messages(with_categories=true) %}{% if msgs %}
+      {% for cat,msg in msgs %}
+      <div class="alert alert-{{ cat }} alert-dismissible fade show mb-2 py-2" style="font-size:.84rem;border-radius:9px;">
+        <i class="bi bi-info-circle me-1"></i>{{ msg }}
+        <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+      </div>
+      {% endfor %}
+    {% endif %}{% endwith %}
+  </div>
+
+  <main class="content">{% block content %}{% endblock %}</main>
+</div>
+
+{% else %}
+{% block auth %}{% endblock %}
+{% endif %}
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js"></script>
+<script>
+// Clock
+(function tick(){
+  const now=new Date();
+  const d=document.getElementById('clkD'),t=document.getElementById('clkT');
+  if(d) d.textContent=now.toLocaleDateString('en-IN',{weekday:'short',day:'2-digit',month:'short'});
+  if(t) t.textContent=now.toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+  setTimeout(tick,1000);
+})();
+
+// Sidebar
+const sb=document.getElementById('sb'), ov=document.getElementById('ov'), tog=document.getElementById('tog'), main=document.getElementById('main');
+function openSb(){
+  if(window.innerWidth<=768){sb&&sb.classList.add('open');ov&&ov.classList.add('show');}
+  else{sb&&sb.classList.toggle('col');main&&main.classList.toggle('col');}
+}
+tog&&tog.addEventListener('click',openSb);
+ov&&ov.addEventListener('click',()=>{sb&&sb.classList.remove('open');ov.classList.remove('show');});
+document.querySelectorAll('.nav-a').forEach(a=>a.addEventListener('click',()=>{if(window.innerWidth<=768){sb&&sb.classList.remove('open');ov&&ov.classList.remove('show');}}));
+</script>
+{% block js %}{% endblock %}
+</body>
+</html>
+
+
+-------------------------------------Dashboard.html---------------------------------------------------------
+{% extends 'base.html' %}
+{% block title %}Dashboard{% endblock %}
+{% block ptitle %}<i class="bi bi-grid-1x2-fill me-2" style="color:var(--accent);"></i>Dashboard{% endblock %}
+{% block content %}
+<!-- Server IP Banner (admin/principal only) -->
+{% if session.role in ['admin','principal'] %}
+<div class="srv mb-3">
+  <i class="bi bi-phone-fill" style="font-size:1.2rem;color:#34d399;"></i>
+  <div style="flex:1;">
+    <div style="font-size:.72rem;color:var(--muted);margin-bottom:2px;">📱 Open on mobile (same WiFi network):</div>
+    <span class="srv-url">http://{{ lip }}:5000</span>
+  </div>
+  <button onclick="copyUrl('http://{{ lip }}:5000',this)" class="btn btn-g sm"><i class="bi bi-clipboard"></i> Copy</button>
+</div>
+{% endif %}
+
+{% if session.role in ['admin','principal'] %}
+<div class="row g-2 mb-3">
+  <div class="col-6 col-lg-3"><div class="stat"><div class="s-ic" style="background:rgba(29,111,232,.14);color:#60a5fa;"><i class="bi bi-mortarboard-fill"></i></div><div><div class="s-lb">Students</div><div class="s-val">{{ data.students }}</div></div></div></div>
+  <div class="col-6 col-lg-3"><div class="stat"><div class="s-ic" style="background:rgba(16,185,129,.14);color:#34d399;"><i class="bi bi-person-check-fill"></i></div><div><div class="s-lb">Today Present</div><div class="s-val">{{ data.today }}</div></div></div></div>
+  <div class="col-6 col-lg-3"><div class="stat"><div class="s-ic" style="background:rgba(139,92,246,.14);color:#a78bfa;"><i class="bi bi-person-workspace"></i></div><div><div class="s-lb">Faculty</div><div class="s-val">{{ data.faculty }}</div></div></div></div>
+  <div class="col-6 col-lg-3"><div class="stat"><div class="s-ic" style="background:rgba(245,158,11,.14);color:#fbbf24;"><i class="bi bi-building"></i></div><div><div class="s-lb">Principals</div><div class="s-val">{{ data.principals }}</div></div></div></div>
+</div>
+<div class="row g-3">
+  <div class="col-lg-8">
+    <div class="card">
+      <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+        <h6 class="mb-0" style="font-family:'Syne',sans-serif;font-weight:700;"><i class="bi bi-clock-history me-2" style="color:var(--accent);"></i>Recent Attendance</h6>
+        <a href="{{ url_for('mark') }}" class="btn btn-p sm"><i class="bi bi-camera-video-fill"></i> Mark Now</a>
+      </div>
+      <div class="table-responsive">
+        <table class="tbl">
+          <thead><tr><th>Photo</th><th>Student</th><th class="hide-m">Roll</th><th class="hide-m">Dept/Sem</th><th>Time</th><th>Conf</th></tr></thead>
+          <tbody>{% for r in data.recent %}<tr>
+            <td><div class="av">{% if r.photo_path %}<img src="{{ url_for('static',filename=r.photo_path) }}" alt=""/>{% else %}<i class="bi bi-person-fill"></i>{% endif %}</div></td>
+            <td><strong>{{ r.name }}</strong></td>
+            <td class="hide-m"><span class="b-blue">{{ r.roll_no }}</span></td>
+            <td class="hide-m" style="font-size:.78rem;color:var(--muted);">{{ r.dept }} · Sem {{ r.semester }}</td>
+            <td style="font-size:.76rem;color:var(--muted);">{{ r.timestamp.strftime('%d %b, %I:%M %p') }}</td>
+            <td>{% if r.confidence %}<span class="b-ok">{{ "%.0f"|format(r.confidence) }}%</span>{% else %}—{% endif %}</td>
+          </tr>{% else %}<tr><td colspan="6" class="text-center" style="color:var(--muted);padding:24px;">No attendance today.</td></tr>{% endfor %}</tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+  <div class="col-lg-4">
+    <div class="card"><h6 class="mb-3" style="font-family:'Syne',sans-serif;font-weight:700;"><i class="bi bi-lightning-fill me-2" style="color:var(--warn);"></i>Quick Actions</h6>
+      <div class="d-flex flex-column gap-2">
+        <a href="{{ url_for('mark') }}" class="btn btn-p justify-content-center"><i class="bi bi-camera-video-fill"></i> Mark Attendance</a>
+        <a href="{{ url_for('admin_add_student') if session.role=='admin' else url_for('students') }}" class="btn btn-g justify-content-center"><i class="bi bi-person-plus-fill"></i> Add Student</a>
+        <a href="{{ url_for('attendance') }}" class="btn btn-y justify-content-center"><i class="bi bi-table"></i> View Records</a>
+        <a href="{{ url_for('reports') }}" class="btn btn-pur justify-content-center"><i class="bi bi-bar-chart-fill"></i> Reports</a>
+      </div>
+    </div>
+  </div>
+</div>
+
+{% elif session.role=='faculty' %}
+<div class="row g-2 mb-3">
+  <div class="col-6"><div class="stat"><div class="s-ic" style="background:rgba(29,111,232,.14);color:#60a5fa;"><i class="bi bi-mortarboard-fill"></i></div><div><div class="s-lb">My Students ({{ session.dept }})</div><div class="s-val">{{ data.students }}</div></div></div></div>
+  <div class="col-6"><div class="stat"><div class="s-ic" style="background:rgba(16,185,129,.14);color:#34d399;"><i class="bi bi-person-check-fill"></i></div><div><div class="s-lb">Today Marked</div><div class="s-val">{{ data.today }}</div></div></div></div>
+</div>
+<div class="card">
+  <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+    <h6 class="mb-0" style="font-family:'Syne',sans-serif;font-weight:700;">Recent Attendance I Marked</h6>
+    <a href="{{ url_for('mark') }}" class="btn btn-p sm"><i class="bi bi-camera-video-fill"></i> Mark Now</a>
+  </div>
+  <div class="table-responsive">
+    <table class="tbl"><thead><tr><th>Photo</th><th>Student</th><th class="hide-m">Roll</th><th>Time</th><th>Conf</th></tr></thead>
+    <tbody>{% for r in data.recent %}<tr>
+      <td><div class="av">{% if r.photo_path %}<img src="{{ url_for('static',filename=r.photo_path) }}" alt=""/>{% else %}<i class="bi bi-person-fill"></i>{% endif %}</div></td>
+      <td><strong>{{ r.name }}</strong></td><td class="hide-m"><span class="b-blue">{{ r.roll_no }}</span></td>
+      <td style="font-size:.76rem;color:var(--muted);">{{ r.timestamp.strftime('%d %b, %I:%M %p') }}</td>
+      <td>{% if r.confidence %}<span class="b-ok">{{ "%.0f"|format(r.confidence) }}%</span>{% else %}—{% endif %}</td>
+    </tr>{% else %}<tr><td colspan="5" class="text-center" style="color:var(--muted);padding:24px;">No records yet.</td></tr>{% endfor %}</tbody></table>
+  </div>
+</div>
+
+{% elif session.role=='student' %}
+<div class="card mb-3" style="background:linear-gradient(135deg,rgba(29,111,232,.1),rgba(0,188,212,.06));border-color:rgba(29,111,232,.18);">
+  <div class="d-flex align-items-center gap-4 flex-wrap">
+    <div class="av-lg">{% if data.profile.photo_path %}<img src="{{ url_for('static',filename=data.profile.photo_path) }}" alt=""/>{% else %}<i class="bi bi-person-fill"></i>{% endif %}</div>
+    <div>
+      <h4 style="font-family:'Syne',sans-serif;font-weight:800;margin-bottom:3px;">{{ data.profile.name }}</h4>
+      <div style="font-size:.82rem;color:var(--muted);">
+        <span class="b-blue me-2">{{ data.profile.roll_no }}</span>{{ data.profile.dept }} · Semester {{ data.profile.semester }}
+      </div>
+      <div class="d-flex gap-3 mt-2">
+        <div><span style="font-family:'Syne',sans-serif;font-size:1.4rem;font-weight:800;color:var(--success);">{{ data.days }}</span><span style="color:var(--muted);font-size:.76rem;margin-left:4px;">Days Present</span></div>
+        <div><span style="font-family:'Syne',sans-serif;font-size:1.4rem;font-weight:800;color:var(--accent);">{{ 'Yes' if data.today else 'No' }}</span><span style="color:var(--muted);font-size:.76rem;margin-left:4px;">Today</span></div>
+      </div>
+    </div>
+  </div>
+</div>
+<div class="card">
+  <h6 class="mb-3" style="font-family:'Syne',sans-serif;font-weight:700;"><i class="bi bi-clock-history me-2" style="color:var(--accent);"></i>Recent Attendance</h6>
+  <div class="table-responsive">
+    <table class="tbl"><thead><tr><th>Date</th><th>Time</th><th>Status</th><th>Confidence</th></tr></thead>
+    <tbody>{% for r in data.recent %}<tr>
+      <td>{{ r.timestamp.strftime('%d %b %Y') }}</td>
+      <td style="color:var(--muted);">{{ r.timestamp.strftime('%I:%M %p') }}</td>
+      <td><span class="b-ok">{{ r.status }}</span></td>
+      <td>{% if r.confidence %}<span style="color:var(--success);font-weight:700;">{{ "%.1f"|format(r.confidence) }}%</span>{% else %}—{% endif %}</td>
+    </tr>{% else %}<tr><td colspan="4" class="text-center" style="color:var(--muted);padding:24px;">No records yet.</td></tr>{% endfor %}</tbody></table>
+  </div>
+</div>
+{% endif %}
+{% endblock %}
+{% block js %}
+<script>
+function copyUrl(url,btn){navigator.clipboard.writeText(url).then(()=>{btn.innerHTML='<i class="bi bi-check2"></i> Copied!';setTimeout(()=>btn.innerHTML='<i class="bi bi-clipboard"></i> Copy',2000);}).catch(()=>alert(url));}
+</script>
+{% endblock %}
+
+
+
+-------------------------------------faculty_attendance.html---------------------------------------------------------
+{% extends 'base.html' %}
+{% block title %}Faculty Attendance{% endblock %}
+{% block ptitle %}<i class="bi bi-calendar2-check-fill me-2" style="color:var(--accent);"></i>Faculty Attendance Records{% endblock %}
+{% block content %}
+<div class="card mb-3">
+  <form method="GET" class="row g-2 align-items-end">
+    <div class="col-6 col-md-3"><label class="fl">Date</label><input type="date" name="date" value="{{ date_f }}" class="fi"/></div>
+    <div class="col-6 col-md-2"><button type="submit" class="btn btn-p sm w-100 justify-content-center"><i class="bi bi-funnel-fill"></i> Filter</button></div>
+    <div class="col-6 col-md-1"><a href="{{ url_for('faculty_attendance') }}" class="btn btn-s sm w-100 justify-content-center"><i class="bi bi-x"></i></a></div>
+    <div class="col-6 col-md-auto"><a href="{{ url_for('download_csv',who='faculty') }}" class="btn btn-g sm"><i class="bi bi-download"></i> CSV</a></div>
+  </form>
+</div>
+<div class="card">
+  <div class="table-responsive">
+    <table class="tbl">
+      <thead><tr><th>#</th><th>Photo</th><th>Faculty</th><th class="hide-m">Emp ID</th><th>Dept</th><th>Status</th><th>Confidence</th><th>Time</th></tr></thead>
+      <tbody>{% for r in records %}
+      <tr>
+        <td style="color:var(--muted);">{{ loop.index }}</td>
+        <td><div class="av">{% if r.photo_path %}<img src="{{ url_for('static',filename=r.photo_path) }}" alt=""/>{% else %}<i class="bi bi-person-fill"></i>{% endif %}</div></td>
+        <td><strong>{{ r.title }} {{ r.name }}</strong></td>
+        <td class="hide-m"><span class="b-pur">{{ r.employee_id }}</span></td>
+        <td style="font-size:.8rem;">{{ r.dept }}</td>
+        <td><span class="b-ok">{{ r.status }}</span></td>
+        <td>{% if r.confidence %}<span style="color:var(--success);font-weight:700;">{{ "%.1f"|format(r.confidence) }}%</span>{% else %}—{% endif %}</td>
+        <td style="color:var(--muted);font-size:.76rem;white-space:nowrap;">{{ r.timestamp.strftime('%d %b %Y, %I:%M %p') }}</td>
+      </tr>
+      {% else %}<tr><td colspan="8" class="text-center" style="color:var(--muted);padding:28px;">No records found.</td></tr>{% endfor %}</tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}
+
+
+
+
+-------------------------------------faculty_list.html---------------------------------------------------------
+{% extends 'base.html' %}
+{% block title %}Faculty{% endblock %}
+{% block ptitle %}<i class="bi bi-person-workspace me-2" style="color:var(--accent);"></i>Faculty{% endblock %}
+{% block content %}
+<div class="d-flex justify-content-between mb-3 flex-wrap gap-2">
+  <span style="color:var(--muted);font-size:.82rem;">{{ faculty|length }} faculty member(s)</span>
+  {% if session.role=='admin' %}<a href="{{ url_for('admin_add_faculty') }}" class="btn btn-p sm"><i class="bi bi-person-plus-fill"></i> Add Faculty</a>{% endif %}
+</div>
+<div class="card mb-2"><input class="fi" placeholder="🔍 Search…" oninput="filt(this.value)"/></div>
+<div class="card">
+  <div class="table-responsive">
+    <table class="tbl" id="facTbl">
+      <thead><tr><th>#</th><th>Photo</th><th>Name</th><th class="hide-m">Emp ID</th><th>Dept</th><th class="hide-m">Email</th><th>Status</th>{% if session.role=='admin' %}<th>Actions</th>{% endif %}</tr></thead>
+      <tbody>{% for f in faculty %}
+      <tr>
+        <td style="color:var(--muted);">{{ loop.index }}</td>
+        <td><div class="av">{% if f.photo_path %}<img src="{{ url_for('static',filename=f.photo_path) }}" alt=""/>{% else %}<i class="bi bi-person-fill"></i>{% endif %}</div></td>
+        <td><strong>{{ f.title }} {{ f.name }}</strong></td>
+        <td class="hide-m" style="font-size:.78rem;">{{ f.employee_id }}</td>
+        <td><span class="b-pur">{{ f.dept }}</span></td>
+        <td class="hide-m" style="color:var(--muted);font-size:.78rem;">{{ f.email }}</td>
+        <td>{% if f.is_active %}<span class="b-ok">Active</span>{% else %}<span class="b-no">Inactive</span>{% endif %}</td>
+        {% if session.role=='admin' %}
+        <td>
+          <a href="{{ url_for('admin_edit_faculty',fid=f.id) }}" class="btn btn-s xs"><i class="bi bi-pencil-fill"></i></a>
+          <form method="POST" action="{{ url_for('admin_delete_faculty',fid=f.id) }}" style="display:inline;" onsubmit="return confirm('Delete {{ f.title }} {{ f.name }}?')">
+            <button type="submit" class="btn btn-r xs"><i class="bi bi-trash3-fill"></i></button>
+          </form>
+        </td>
+        {% endif %}
+      </tr>
+      {% else %}<tr><td colspan="8" class="text-center" style="color:var(--muted);padding:28px;">No faculty found.</td></tr>{% endfor %}</tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}
+{% block js %}<script>function filt(q){q=q.toLowerCase();document.querySelectorAll('#facTbl tbody tr').forEach(r=>{r.style.display=r.textContent.toLowerCase().includes(q)?'':'none';});}</script>{% endblock %}
+
+------------------------------------------------forgot.html-------------------------------------
+
+{% extends 'base.html' %}
+{% block title %}Forgot Password{% endblock %}
+{% block auth %}
+<div class="auth-pg">
+  <div class="auth-box">
+    <div class="auth-ico"><i class="bi bi-key-fill text-white"></i></div>
+    <h1 class="auth-h">Forgot Password</h1>
+    <p class="auth-s">Enter your email and role to receive a reset token</p>
+
+    {% with msgs=get_flashed_messages(with_categories=true) %}{% if msgs %}
+      {% for cat,msg in msgs %}
+      <div class="alert alert-{{ cat }} py-2 mb-3" style="font-size:.82rem;border-radius:9px;">{{ msg }}</div>
+      {% endfor %}
+    {% endif %}{% endwith %}
+
+    <form method="POST">
+      <div class="mb-3">
+        <label class="fl">Your Role</label>
+        <select name="role" class="fi" required>
+          <option value="admin">Admin</option>
+          <option value="principal">Principal</option>
+          <option value="faculty">Faculty</option>
+          <option value="student" selected>Student</option>
+        </select>
+      </div>
+      <div class="mb-4">
+        <label class="fl">Registered Email</label>
+        <input type="email" name="email" class="fi" placeholder="Enter your email" required/>
+      </div>
+      <button type="submit" class="btn btn-p w-100 justify-content-center" style="padding:11px;">
+        <i class="bi bi-envelope-fill"></i> Send Reset Token
+      </button>
+    </form>
+    <div class="text-center mt-3" style="font-size:.8rem;">
+      <a href="{{ url_for('login') }}" style="color:var(--accent);">← Back to Login</a>
+    </div>
+    <div class="mt-3" style="background:var(--card2);border-radius:9px;padding:10px;font-size:.74rem;color:var(--muted);">
+      <i class="bi bi-info-circle me-1"></i>
+      In production, the reset link is emailed. For this demo, the token is shown on screen after submission.
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+
+------------------------------------------------login.html-------------------------------------
+
+{% extends 'base.html' %}
+{% block title %}Login{% endblock %}
+{% block auth %}
+<div class="auth-pg">
+  <div class="auth-box">
+    <div class="auth-ico"><i class="bi bi-person-bounding-box text-white"></i></div>
+    <h1 class="auth-h">FaceAttend v3</h1>
+    <p class="auth-s">Smart Face Recognition Attendance System</p>
+
+    {% with msgs=get_flashed_messages(with_categories=true) %}{% if msgs %}
+      {% for cat,msg in msgs %}
+      <div class="alert alert-{{ cat }} py-2 mb-3" style="font-size:.82rem;border-radius:9px;">{{ msg }}</div>
+      {% endfor %}
+    {% endif %}{% endwith %}
+
+    <div class="rtabs" id="rtabs">
+      <button class="rtab on" onclick="setRole(this,'admin')"><i class="bi bi-shield-fill-check"></i>Admin</button>
+      <button class="rtab" onclick="setRole(this,'principal')"><i class="bi bi-building"></i>Principal</button>
+      <button class="rtab" onclick="setRole(this,'faculty')"><i class="bi bi-person-workspace"></i>Faculty</button>
+      <button class="rtab" onclick="setRole(this,'student')"><i class="bi bi-mortarboard-fill"></i>Student</button>
+    </div>
+
+    <form method="POST">
+      <input type="hidden" name="role" id="roleInput" value="admin"/>
+      <div class="mb-3">
+        <label class="fl"><i class="bi bi-envelope me-1"></i>Email / Username</label>
+        <input type="text" name="email" class="fi" placeholder="Enter email or username" required autocomplete="username"/>
+      </div>
+      <div class="mb-3">
+        <label class="fl"><i class="bi bi-lock me-1"></i>Password</label>
+        <div style="position:relative;">
+          <input type="password" name="password" id="pw" class="fi" placeholder="Enter password" required autocomplete="current-password"/>
+          <button type="button" onclick="togglePw()" style="position:absolute;right:11px;top:50%;transform:translateY(-50%);background:none;border:none;color:var(--muted);cursor:pointer;font-size:1rem;">
+            <i class="bi bi-eye" id="eyeI"></i>
+          </button>
+        </div>
+      </div>
+      <button type="submit" class="btn btn-p w-100 justify-content-center" style="padding:11px;font-size:.95rem;">
+        <i class="bi bi-box-arrow-in-right"></i> Login
+      </button>
+    </form>
+
+    <div class="d-flex justify-content-between mt-3 flex-wrap gap-1" style="font-size:.8rem;">
+      <a href="{{ url_for('forgot') }}" style="color:var(--accent);">Forgot Password?</a>
+      <a href="{{ url_for('register') }}" style="color:var(--accent);">New Registration →</a>
+    </div>
+
+    <div style="margin-top:18px;background:var(--card2);border-radius:9px;padding:11px;font-size:.72rem;color:var(--muted);">
+      <div style="font-weight:700;color:var(--text);margin-bottom:5px;"><i class="bi bi-key me-1"></i>Default Credentials</div>
+      <div>🛡️ Admin: <strong>admin@college.edu</strong> / <strong>Admin@123</strong></div>
+      <div style="margin-top:3px;font-style:italic;">Register Principal, Faculty, Students via "New Registration"</div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+{% block js %}
+<script>
+function setRole(btn,role){
+  document.querySelectorAll('.rtab').forEach(b=>b.classList.remove('on'));
+  btn.classList.add('on');
+  document.getElementById('roleInput').value=role;
+}
+function togglePw(){
+  const pw=document.getElementById('pw'),ic=document.getElementById('eyeI');
+  pw.type=pw.type==='password'?'text':'password';
+  ic.className='bi bi-eye'+(pw.type==='text'?'-slash':'');
+}
+</script>
+{% endblock %}
+
+
+
+
+------------------------------------------------mark.html-------------------------------------
+{% extends 'base.html' %}
+{% block title %}Mark Attendance{% endblock %}
+{% block ptitle %}
+  {% if session.role=='principal' %}
+    <i class="bi bi-camera-video-fill me-2" style="color:var(--accent);"></i>Mark Faculty Attendance
+  {% else %}
+    <i class="bi bi-camera-video-fill me-2" style="color:var(--accent);"></i>Mark Student Attendance
+  {% endif %}
+{% endblock %}
+
+{% block content %}
+<div class="row g-3">
+  <!-- Camera Panel -->
+  <div class="col-lg-7">
+    <div class="card">
+      <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+        <h6 class="mb-0" style="font-family:'Syne',sans-serif;font-weight:700;">📷 Live Camera</h6>
+        <span id="camSt" class="b-warn">Not Started</span>
+      </div>
+
+      <!-- Camera box -->
+      <div class="cam-box mb-3" id="camBox">
+        <video id="video" autoplay muted playsinline style="width:100%;height:100%;object-fit:cover;"></video>
+        <canvas id="snapCanvas" style="display:none;"></canvas>
+        <div class="cam-ov" id="camOverlay">
+          <i class="bi bi-camera-video-off" style="font-size:2.5rem;opacity:.4;"></i>
+          <span style="font-size:.85rem;">Tap "Start Camera" below</span>
+          <span style="font-size:.75rem;color:var(--muted);">Allow camera permission when asked</span>
+        </div>
+        <div class="face-box" id="faceBox" style="display:none;"><span></span></div>
+        <div class="scan" id="scanLine" style="display:none;"></div>
+      </div>
+
+      <!-- Controls -->
+      <div class="d-flex gap-2 flex-wrap">
+        <button id="startBtn" class="btn btn-p">
+          <i class="bi bi-camera-video-fill"></i> Start Camera
+        </button>
+        <button id="captureBtn" class="btn btn-g" style="display:none;">
+          <i class="bi bi-person-bounding-box"></i> Recognize
+        </button>
+        <button id="autoBtn" class="btn btn-pur" style="display:none;" title="Auto-recognize every 3s">
+          <i class="bi bi-play-circle-fill"></i> Auto (3s)
+        </button>
+        <button id="stopBtn" class="btn btn-r" style="display:none;">
+          <i class="bi bi-stop-fill"></i> Stop
+        </button>
+      </div>
+
+      <!-- Info -->
+      <div style="margin-top:12px;font-size:.75rem;color:var(--muted);line-height:1.8;">
+        <div><i class="bi bi-info-circle me-1"></i>
+          {% if session.role=='principal' %}Recognizes <strong>faculty</strong> members and marks their attendance.
+          {% elif session.role=='faculty' %}Recognizes <strong>students</strong> in your department ({{ session.dept }}).
+          {% else %}Recognizes <strong>all students</strong> with registered faces.{% endif %}
+        </div>
+        <div><i class="bi bi-shield-check me-1"></i>Confidence threshold: 55% (lower = stricter matching)</div>
+        <div><i class="bi bi-clock me-1"></i>Duplicate prevention: 2-hour window per person</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Results -->
+  <div class="col-lg-5">
+    <div class="card" style="min-height:300px;">
+      <div class="d-flex justify-content-between align-items-center mb-3">
+        <h6 class="mb-0" style="font-family:'Syne',sans-serif;font-weight:700;">
+          <i class="bi bi-check2-circle me-2" style="color:var(--success);"></i>Recognition Results
+        </h6>
+        <button onclick="clearRes()" class="btn btn-s xs"><i class="bi bi-trash3"></i></button>
+      </div>
+      <div id="results" style="max-height:400px;overflow-y:auto;">
+        <div id="noRes" class="text-center" style="padding:36px 0;color:var(--muted);">
+          <i class="bi bi-person-bounding-box" style="font-size:2.5rem;display:block;margin-bottom:10px;opacity:.35;"></i>
+          Start camera and capture to recognize
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Session counter -->
+<div class="card mt-3 d-flex align-items-center gap-4 flex-wrap py-3">
+  <div style="font-size:.8rem;color:var(--muted);"><i class="bi bi-bar-chart me-1"></i>Session</div>
+  <div><strong id="cMark" style="color:var(--success);font-size:1.15rem;">0</strong> <span style="color:var(--muted);font-size:.78rem;">Marked</span></div>
+  <div><strong id="cDupe" style="color:var(--warn);font-size:1.15rem;">0</strong> <span style="color:var(--muted);font-size:.78rem;">Already Marked</span></div>
+  <div><strong id="cUnk" style="color:var(--danger);font-size:1.15rem;">0</strong> <span style="color:var(--muted);font-size:.78rem;">Unknown</span></div>
+</div>
+{% endblock %}
+
+{% block js %}
+<script src="{{ url_for('static',filename='js/cam.js') }}"></script>
+<script>
+let cam=null, autoT=null, mk=0, du=0, un=0;
+const camSt   = document.getElementById('camSt');
+const startBtn = document.getElementById('startBtn');
+const captureBtn=document.getElementById('captureBtn');
+const autoBtn  = document.getElementById('autoBtn');
+const stopBtn  = document.getElementById('stopBtn');
+
+startBtn.addEventListener('click', async () => {
+  cam = new FASCam({videoId:'video',canvasId:'snapCanvas',overlayId:'camOverlay',fboxId:'faceBox',scanId:'scanLine'});
+  const ok = await cam.start();
+  if (ok) {
+    camSt.textContent='Active'; camSt.className='b-ok';
+    startBtn.style.display='none';
+    captureBtn.style.display=''; autoBtn.style.display=''; stopBtn.style.display='';
+  }
+});
+
+stopBtn.addEventListener('click', stopAll);
+function stopAll(){
+  if(autoT){clearInterval(autoT);autoT=null;autoBtn.innerHTML='<i class="bi bi-play-circle-fill"></i> Auto (3s)';}
+  cam&&cam.stop(); cam=null;
+  camSt.textContent='Stopped'; camSt.className='b-no';
+  startBtn.style.display=''; captureBtn.style.display='none'; autoBtn.style.display='none'; stopBtn.style.display='none';
+}
+
+captureBtn.addEventListener('click', doCapture);
+
+autoBtn.addEventListener('click', ()=>{
+  if(autoT){
+    clearInterval(autoT); autoT=null;
+    autoBtn.innerHTML='<i class="bi bi-play-circle-fill"></i> Auto (3s)';
+    autoBtn.className='btn btn-pur';
+  } else {
+    autoT=setInterval(doCapture,3000);
+    autoBtn.innerHTML='<i class="bi bi-stop-circle-fill"></i> Stop Auto';
+    autoBtn.className='btn btn-r';
+    doCapture();
+  }
+});
+
+async function doCapture(){
+  if(!cam||!cam.isActive()){stopAll();return;}
+  const url=cam.capture();
+  if(!url) return;
+  camSt.textContent='Recognizing…'; camSt.className='b-warn';
+  try{
+    const res=await fetch('/api/recognize',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({image:url})
+    });
+    const data=await res.json();
+    handleData(data);
+  }catch(e){addRes('er','bi-x-circle','Error','Network issue','');}
+  camSt.textContent='Active'; camSt.className='b-ok';
+}
+
+function handleData(d){
+  if(d.status==='no_face'){addRes('er','bi-question-circle','No Face','No face detected in frame','');un++;upd();return;}
+  if(d.status==='error'){addRes('er','bi-x-circle','Error',d.message||'Unknown error','');return;}
+  (d.results||[]).forEach(r=>{
+    if(r.status==='marked'){addRes('ok','bi-check-circle-fill',r.name,`${r.roll_no} · ${r.dept}${r.sem?' · Sem '+r.sem:''}`,r.confidence+'%',r.photo);mk++;upd();}
+    else if(r.status==='already'){addRes('wa','bi-clock-history',r.name,`Already marked · ${r.roll_no}`,r.confidence+'%',r.photo);du++;upd();}
+    else{addRes('er','bi-person-x-fill','Unknown','Face not recognised','');un++;upd();}
+  });
+}
+
+function addRes(type,ico,name,sub,conf,photo){
+  document.getElementById('noRes').style.display='none';
+  const ts=new Date().toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+  const avHtml=photo
+    ?`<div class="res-av"><img src="/static/${photo}" alt=""/></div>`
+    :`<div class="res-av"><i class="bi ${ico}"></i></div>`;
+  const d=document.createElement('div');
+  d.className='res '+type;
+  d.innerHTML=`${avHtml}<div style="flex:1;min-width:0;"><div style="font-weight:700;font-size:.88rem;">${name}</div><div style="font-size:.74rem;color:var(--muted);">${sub}</div></div><div style="text-align:right;flex-shrink:0;">${conf?`<div style="font-size:.8rem;font-weight:700;color:var(--success);">${conf}</div>`:''}<div style="font-size:.7rem;color:var(--muted);">${ts}</div></div>`;
+  document.getElementById('results').insertBefore(d,document.getElementById('results').firstChild);
+}
+
+function clearRes(){
+  const r=document.getElementById('results');
+  r.innerHTML=''; r.appendChild(document.getElementById('noRes'));
+  document.getElementById('noRes').style.display='';
+  mk=du=un=0; upd();
+}
+function upd(){
+  document.getElementById('cMark').textContent=mk;
+  document.getElementById('cDupe').textContent=du;
+  document.getElementById('cUnk').textContent=un;
+}
+</script>
+{% endblock %}
+
+
+------------------------------profile.html----------------------------------------------------------------------------
+{% extends 'base.html' %}
+{% block title %}Profile{% endblock %}
+{% block ptitle %}<i class="bi bi-person-circle me-2" style="color:var(--accent);"></i>My Profile{% endblock %}
+{% block content %}
+<div class="row g-3 justify-content-center">
+<div class="col-lg-7">
+  <div class="card mb-3 pcard">
+    <div class="av-lg">{% if user.photo_path %}<img src="{{ url_for('static',filename=user.photo_path) }}" alt=""/>{% else %}<i class="bi bi-person-fill"></i>{% endif %}</div>
+    <div>
+      <h4 style="font-family:'Syne',sans-serif;font-weight:800;margin-bottom:3px;">
+        {{ (user.title+' ') if user.title is defined and user.title else '' }}{{ user.name }}
+      </h4>
+      <span class="sb-role r-{{ session.role }} mb-2 d-inline-block" style="font-size:.75rem;">{{ session.role|title }}</span>
+      <div style="color:var(--muted);font-size:.83rem;margin-top:6px;">
+        {% if user.roll_no is defined %}<div><i class="bi bi-card-text me-1"></i>{{ user.roll_no }}</div>{% endif %}
+        {% if user.employee_id is defined %}<div><i class="bi bi-badge-ad me-1"></i>{{ user.employee_id }}</div>{% endif %}
+        {% if user.dept %}<div><i class="bi bi-building me-1"></i>{{ user.dept }}</div>{% endif %}
+        <div><i class="bi bi-envelope me-1"></i>{{ user.email }}</div>
+        {% if user.semester is defined %}<div><i class="bi bi-book me-1"></i>Semester {{ user.semester }}</div>{% endif %}
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h6 class="mb-3" style="font-family:'Syne',sans-serif;font-weight:700;"><i class="bi bi-pencil-fill me-2" style="color:var(--accent);"></i>Edit Profile</h6>
+    <form method="POST">
+      <div class="row g-3">
+        <div class="col-md-6"><label class="fl">Full Name</label><input type="text" name="name" class="fi" value="{{ user.name }}" required/></div>
+        <div class="col-md-6"><label class="fl">Phone</label><input type="tel" name="phone" class="fi" value="{{ user.phone or '' }}"/></div>
+        <div class="col-12">
+          <label class="fl"><i class="bi bi-camera me-1"></i>Update Photo</label>
+          <div class="d-flex align-items-center gap-3">
+            <div id="prev" style="width:56px;height:56px;border-radius:50%;background:var(--card2);border:2px dashed var(--border);display:flex;align-items:center;justify-content:center;overflow:hidden;flex-shrink:0;">
+              {% if user.photo_path %}<img src="{{ url_for('static',filename=user.photo_path) }}" style="width:100%;height:100%;object-fit:cover;border-radius:50%;"/>
+              {% else %}<i class="bi bi-person-fill" style="font-size:1.4rem;color:var(--muted);"></i>{% endif %}
+            </div>
+            <button type="button" onclick="openCam()" class="btn btn-s sm"><i class="bi bi-camera-fill"></i> Capture</button>
+          </div>
+          <input type="hidden" name="profile_image" id="profImg"/>
+        </div>
+      </div>
+      <div class="d-flex gap-2 mt-4 flex-wrap">
+        <button type="submit" class="btn btn-p"><i class="bi bi-check2-circle"></i> Save Changes</button>
+        <a href="{{ url_for('switch') }}" class="btn btn-s"><i class="bi bi-arrow-left-right"></i> Switch Account</a>
+        <a href="{{ url_for('logout') }}" class="btn btn-r"><i class="bi bi-box-arrow-right"></i> Logout</a>
+      </div>
+    </form>
+  </div>
+</div>
+</div>
+
+<!-- Camera modal -->
+<div id="camModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.82);z-index:9999;align-items:center;justify-content:center;padding:14px;">
+  <div style="background:var(--card);border-radius:15px;padding:17px;width:100%;max-width:360px;border:1px solid var(--border);">
+    <div class="d-flex justify-content-between mb-2"><strong style="font-size:.9rem;">Take Photo</strong>
+    <button onclick="closeCam()" style="background:none;border:none;color:var(--muted);font-size:1.2rem;cursor:pointer;"><i class="bi bi-x"></i></button></div>
+    <div class="cam-box mb-2"><video id="pv" autoplay muted playsinline></video><div class="cam-ov" id="pov"><i class="bi bi-camera-video-off" style="font-size:2rem;opacity:.5;"></i></div></div>
+    <canvas id="pc" style="display:none;"></canvas>
+    <button onclick="snap()" class="btn btn-p w-100 justify-content-center"><i class="bi bi-camera-fill"></i> Take Photo</button>
+  </div>
+</div>
+{% endblock %}
+{% block js %}
+<script>
+let ps=null;
+function openCam(){
+  document.getElementById('camModal').style.display='flex';
+  navigator.mediaDevices.getUserMedia({video:{facingMode:'user'},audio:false}).then(s=>{ps=s;document.getElementById('pv').srcObject=s;document.getElementById('pov').style.display='none';}).catch(e=>alert('Camera error: '+e.message));
+}
+function closeCam(){if(ps){ps.getTracks().forEach(t=>t.stop());ps=null;}document.getElementById('camModal').style.display='none';}
+function snap(){const v=document.getElementById('pv'),c=document.getElementById('pc');c.width=v.videoWidth||640;c.height=v.videoHeight||480;c.getContext('2d').drawImage(v,0,0);const u=c.toDataURL('image/jpeg',.88);document.getElementById('profImg').value=u;document.getElementById('prev').innerHTML=`<img src="${u}" style="width:100%;height:100%;object-fit:cover;border-radius:50%;"/>`;closeCam();}
+</script>
+{% endblock %}
+
+
+------------------------------------------------register.html-------------------------------------
+
+{% extends 'base.html' %}
+{% block title %}Register{% endblock %}
+{% block auth %}
+<div class="auth-pg" style="align-items:flex-start;padding:16px;">
+<div class="auth-box" style="max-width:620px;margin:0 auto;">
+  <div class="auth-ico"><i class="bi bi-person-plus-fill text-white"></i></div>
+  <h1 class="auth-h">New Registration</h1>
+  <p class="auth-s">Create account — Principal · Faculty · Student</p>
+
+  {% with msgs=get_flashed_messages(with_categories=true) %}{% if msgs %}
+    {% for cat,msg in msgs %}
+    <div class="alert alert-{{ cat }} py-2 mb-3" style="font-size:.82rem;border-radius:9px;">{{ msg }}</div>
+    {% endfor %}
+  {% endif %}{% endwith %}
+
+  <!-- Role tabs (no admin registration) -->
+  <div class="rtabs">
+    <button class="rtab on" onclick="setRole(this,'principal')"><i class="bi bi-building"></i>Principal</button>
+    <button class="rtab" onclick="setRole(this,'faculty')"><i class="bi bi-person-workspace"></i>Faculty</button>
+    <button class="rtab" onclick="setRole(this,'student')"><i class="bi bi-mortarboard-fill"></i>Student</button>
+  </div>
+
+  <form method="POST" id="regForm">
+    <input type="hidden" name="role" id="roleInput" value="principal"/>
+    <div class="row g-2">
+
+      <!-- Title (faculty only) -->
+      <div class="col-md-3 fac-f" style="display:none;">
+        <label class="fl">Title *</label>
+        <select name="title" class="fi">
+          <option value="Prof.">Prof.</option>
+          <option value="Dr.">Dr.</option>
+          <option value="Mr.">Mr.</option>
+          <option value="Mrs.">Mrs.</option>
+          <option value="Ms.">Ms.</option>
+        </select>
+      </div>
+
+      <div class="col-md-9 fac-f col-md-12 pri-f stu-f" id="nameCol">
+        <label class="fl">Full Name *</label>
+        <input type="text" name="name" class="fi" placeholder="Enter full name" required/>
+      </div>
+
+      <div class="col-md-6">
+        <label class="fl">Email Address *</label>
+        <input type="email" name="email" class="fi" placeholder="email@example.com" required/>
+      </div>
+      <div class="col-md-6">
+        <label class="fl">Phone</label>
+        <input type="tel" name="phone" class="fi" placeholder="10-digit number"/>
+      </div>
+      <div class="col-md-6">
+        <label class="fl">Password *</label>
+        <input type="password" name="password" class="fi" placeholder="Min 6 characters" required minlength="6"/>
+      </div>
+
+      <!-- Employee ID (principal/faculty) -->
+      <div class="col-md-6 pri-f fac-f">
+        <label class="fl">Employee ID *</label>
+        <input type="text" name="employee_id" class="fi" placeholder="e.g. FAC001"/>
+      </div>
+
+      <!-- Department -->
+      <div class="col-md-6 pri-f fac-f stu-f dept-col">
+        <label class="fl">Department</label>
+        <select name="dept" class="fi">
+          <option value="">Select Department</option>
+          {% for d in depts %}<option value="{{ d.name }}">{{ d.name }} ({{ d.degree }})</option>{% endfor %}
+        </select>
+      </div>
+
+      <!-- Student: Roll No + Semester -->
+      <div class="col-md-6 stu-f" style="display:none;">
+        <label class="fl">Roll Number *</label>
+        <input type="text" name="roll_no" class="fi" placeholder="e.g. MCA2024001"/>
+      </div>
+      <div class="col-12 stu-f" style="display:none;" id="semWrap">
+        <label class="fl">Semester *</label>
+        <div class="d-flex flex-wrap gap-2" id="semBtns">
+          <!-- Filled by JS based on department -->
+          <div style="color:var(--muted);font-size:.82rem;">Select department first</div>
+        </div>
+        <input type="hidden" name="semester" id="semInput" value="1"/>
+      </div>
+    </div>
+
+    <!-- Profile Photo (principal/faculty) -->
+    <div class="mt-3 pri-f fac-f" id="profilePhotoDiv">
+      <label class="fl"><i class="bi bi-camera me-1"></i>Profile Photo (optional)</label>
+      <div class="d-flex align-items-center gap-3">
+        <div id="profPreview" style="width:60px;height:60px;border-radius:50%;background:var(--card2);
+          border:2px dashed var(--border);display:flex;align-items:center;justify-content:center;overflow:hidden;flex-shrink:0;">
+          <i class="bi bi-person-fill" style="font-size:1.6rem;color:var(--muted);"></i>
+        </div>
+        <button type="button" class="btn btn-s sm" onclick="openProfCam()">
+          <i class="bi bi-camera-fill"></i> Capture Photo
+        </button>
+      </div>
+      <input type="hidden" name="profile_image" id="profImgInput"/>
+    </div>
+
+    <!-- Face Capture (student) -->
+    <div class="mt-3 stu-f" id="faceDiv" style="display:none;">
+      <label class="fl"><i class="bi bi-person-bounding-box me-1"></i>
+        Face Registration * <small style="color:var(--muted);font-weight:400;">(capture 3–5 photos, different angles)</small>
+      </label>
+      <div class="cam-box mb-2">
+        <video id="video" autoplay muted playsinline></video>
+        <canvas id="snapCanvas" style="display:none;"></canvas>
+        <div class="cam-ov" id="camOverlay">
+          <i class="bi bi-camera-video-off" style="font-size:2.2rem;opacity:.5;"></i>
+          <span style="font-size:.85rem;">Click "Start Camera" below</span>
+        </div>
+        <div class="face-box" id="faceBox" style="display:none;"><span></span></div>
+        <div class="scan" id="scanLine" style="display:none;"></div>
+      </div>
+      <div class="d-flex gap-2 flex-wrap mb-2">
+        <button type="button" id="startBtn" class="btn btn-p sm"><i class="bi bi-camera-video-fill"></i> Start Camera</button>
+        <button type="button" id="snapBtn" class="btn btn-g sm" style="display:none;"><i class="bi bi-camera-fill"></i> Capture</button>
+        <button type="button" id="stopBtn" class="btn btn-r sm" style="display:none;"><i class="bi bi-stop-fill"></i> Stop</button>
+      </div>
+      <div id="capStatus" style="font-size:.78rem;color:var(--muted);">0 photo(s) captured</div>
+      <div class="thumbs" id="thumbs"></div>
+      <div id="hiddenFaces"></div>
+    </div>
+
+    <button type="submit" class="btn btn-p w-100 justify-content-center mt-4" id="subBtn" style="padding:11px;font-size:.95rem;">
+      <i class="bi bi-person-check-fill"></i> Create Account
+    </button>
+  </form>
+  <div class="text-center mt-3" style="font-size:.8rem;color:var(--muted);">
+    Already registered? <a href="{{ url_for('login') }}" style="color:var(--accent);">Login →</a>
+  </div>
+</div>
+</div>
+
+<!-- Profile photo modal -->
+<div id="profModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.8);z-index:9999;
+  align-items:center;justify-content:center;padding:14px;">
+  <div style="background:var(--card);border-radius:15px;padding:18px;width:100%;max-width:380px;border:1px solid var(--border);">
+    <div class="d-flex justify-content-between mb-2">
+      <strong style="font-size:.9rem;">Capture Photo</strong>
+      <button onclick="closeProfCam()" style="background:none;border:none;color:var(--muted);font-size:1.2rem;cursor:pointer;"><i class="bi bi-x"></i></button>
+    </div>
+    <div class="cam-box mb-2">
+      <video id="profVideo" autoplay muted playsinline></video>
+      <div class="cam-ov" id="profOv"><i class="bi bi-camera-video-off" style="font-size:2rem;opacity:.5;"></i></div>
+    </div>
+    <canvas id="profCanvas" style="display:none;"></canvas>
+    <button onclick="snapProf()" class="btn btn-p w-100 justify-content-center"><i class="bi bi-camera-fill"></i> Take Photo</button>
+  </div>
+</div>
+{% endblock %}
+
+{% block js %}
+<script src="{{ url_for('static',filename='js/cam.js') }}"></script>
+<script>
+// Dept → semesters map
+const deptSems = {
+  {% for d in depts %}"{{ d.name }}": {{ d.semesters }},{% endfor %}
+};
+
+let cam=null, profStream=null, capturedFaces=[];
+
+function setRole(btn, role){
+  document.querySelectorAll('.rtab').forEach(b=>b.classList.remove('on'));
+  btn.classList.add('on');
+  document.getElementById('roleInput').value=role;
+  ['pri-f','fac-f','stu-f'].forEach(cls=>{
+    document.querySelectorAll('.'+cls).forEach(el=>{
+      if(cls==='pri-f'&&role==='principal') el.style.display='';
+      else if(cls==='fac-f'&&role==='faculty') el.style.display='';
+      else if(cls==='stu-f'&&role==='student') el.style.display='';
+      else el.style.display='none';
+    });
+  });
+  document.getElementById('faceDiv').style.display=(role==='student')?'':'none';
+  document.getElementById('profilePhotoDiv').style.display=(role!=='student')?'':'none';
+  // fix name col width
+  const nc=document.getElementById('nameCol');
+  nc.className=role==='faculty'?'col-md-9':'col-12';
+}
+// Init principal view
+document.querySelectorAll('.pri-f').forEach(el=>el.style.display='');
+document.querySelectorAll('.fac-f,.stu-f').forEach(el=>el.style.display='none');
+
+// Semester buttons from dept selection
+document.querySelector('select[name="dept"]').addEventListener('change',function(){
+  const dept=this.value; const sems=deptSems[dept]||6;
+  const wrap=document.getElementById('semBtns');
+  wrap.innerHTML='';
+  for(let i=1;i<=sems;i++){
+    const btn=document.createElement('button');
+    btn.type='button'; btn.className='btn btn-s sm'; btn.textContent='Sem '+i;
+    btn.onclick=function(){
+      document.querySelectorAll('#semBtns .btn').forEach(b=>b.className='btn btn-s sm');
+      this.className='btn btn-p sm';
+      document.getElementById('semInput').value=i;
+    };
+    if(i===1){btn.className='btn btn-p sm';document.getElementById('semInput').value=1;}
+    wrap.appendChild(btn);
+  }
+});
+
+// Face camera
+document.getElementById('startBtn').addEventListener('click', async()=>{
+  cam = new FASCam({videoId:'video',canvasId:'snapCanvas',overlayId:'camOverlay',fboxId:'faceBox',scanId:'scanLine'});
+  if(await cam.start()){
+    document.getElementById('startBtn').style.display='none';
+    document.getElementById('snapBtn').style.display='';
+    document.getElementById('stopBtn').style.display='';
+  }
+});
+document.getElementById('stopBtn').addEventListener('click',()=>{
+  cam&&cam.stop();
+  document.getElementById('startBtn').style.display='';
+  document.getElementById('snapBtn').style.display='none';
+  document.getElementById('stopBtn').style.display='none';
+});
+document.getElementById('snapBtn').addEventListener('click',()=>{
+  if(!cam||!cam.isActive()) return;
+  const url=cam.capture();
+  if(!url) return;
+  capturedFaces.push(url);
+  // thumb
+  const img=document.createElement('img'); img.src=url;
+  document.getElementById('thumbs').appendChild(img);
+  // hidden input
+  const inp=document.createElement('input'); inp.type='hidden'; inp.name='face_images[]'; inp.value=url;
+  document.getElementById('hiddenFaces').appendChild(inp);
+  const st=document.getElementById('capStatus');
+  st.textContent=`${capturedFaces.length} photo(s) captured`;
+  st.style.color=capturedFaces.length>=3?'#10b981':'var(--muted)';
+});
+
+// Profile photo
+function openProfCam(){
+  document.getElementById('profModal').style.display='flex';
+  navigator.mediaDevices.getUserMedia({video:{facingMode:'user'},audio:false}).then(s=>{
+    profStream=s; document.getElementById('profVideo').srcObject=s;
+    document.getElementById('profOv').style.display='none';
+  }).catch(e=>alert('Camera error: '+e.message));
+}
+function closeProfCam(){
+  if(profStream){profStream.getTracks().forEach(t=>t.stop());profStream=null;}
+  document.getElementById('profModal').style.display='none';
+}
+function snapProf(){
+  const v=document.getElementById('profVideo'), c=document.getElementById('profCanvas');
+  c.width=v.videoWidth||640; c.height=v.videoHeight||480;
+  c.getContext('2d').drawImage(v,0,0);
+  const url=c.toDataURL('image/jpeg',.88);
+  document.getElementById('profImgInput').value=url;
+  document.getElementById('profPreview').innerHTML=`<img src="${url}" style="width:100%;height:100%;object-fit:cover;border-radius:50%;"/>`;
+  closeProfCam();
+}
+</script>
+{% endblock %}
+
+------------------------------------------------reports.html-------------------------------------
+{% extends 'base.html' %}
+{% block title %}Reports{% endblock %}
+{% block ptitle %}<i class="bi bi-bar-chart-fill me-2" style="color:var(--accent);"></i>Reports & Analytics{% endblock %}
+{% block content %}
+<div class="row g-3">
+  <div class="col-lg-8">
+    <div class="card"><h6 class="mb-3" style="font-family:'Syne',sans-serif;font-weight:700;"><i class="bi bi-graph-up-arrow me-2" style="color:var(--primary);"></i>Last 30 Days — Attendance Trend</h6>
+      <canvas id="trendChart" height="110"></canvas>
+    </div>
+  </div>
+  <div class="col-lg-4">
+    <div class="card"><h6 class="mb-3" style="font-family:'Syne',sans-serif;font-weight:700;"><i class="bi bi-pie-chart-fill me-2" style="color:var(--accent);"></i>Today by {% if session.role=='faculty' %}Semester{% else %}Dept{% endif %}</h6>
+      {% if data.dept_today %}<canvas id="pieChart"></canvas>{% else %}<div class="text-center" style="color:var(--muted);padding:28px;"><i class="bi bi-calendar-x" style="font-size:2rem;display:block;margin-bottom:8px;"></i>No data today</div>{% endif %}
+    </div>
+  </div>
+  <div class="col-12">
+    <div class="card">
+      <div class="d-flex justify-content-between align-items-center mb-3">
+        <h6 class="mb-0" style="font-family:'Syne',sans-serif;font-weight:700;"><i class="bi bi-trophy-fill me-2" style="color:var(--warn);"></i>Top Present Students</h6>
+        <a href="{{ url_for('download_csv') }}" class="btn btn-g sm"><i class="bi bi-download"></i> Export CSV</a>
+      </div>
+      <div class="table-responsive">
+        <table class="tbl"><thead><tr><th>Rank</th><th>Photo</th><th>Name</th><th class="hide-m">Roll</th><th class="hide-m">Dept</th><th>Days</th></tr></thead>
+        <tbody>{% for s in data.top %}
+        <tr>
+          <td>{% if loop.index==1 %}🥇{% elif loop.index==2 %}🥈{% elif loop.index==3 %}🥉{% else %}{{ loop.index }}{% endif %}</td>
+          <td><div class="av">{% if s.photo_path %}<img src="{{ url_for('static',filename=s.photo_path) }}" alt=""/>{% else %}<i class="bi bi-person-fill"></i>{% endif %}</div></td>
+          <td><strong>{{ s.name }}</strong></td>
+          <td class="hide-m"><span class="b-blue">{{ s.roll_no }}</span></td>
+          <td class="hide-m" style="font-size:.8rem;">{{ s.dept }}</td>
+          <td><div style="display:flex;align-items:center;gap:7px;"><div class="cbar" style="width:70px;"><div class="cfill" style="width:{{ [(s.days/(data.top[0].days or 1)*100)|int,100]|min }}%;"></div></div><strong style="color:var(--success);">{{ s.days }}</strong></div></td>
+        </tr>{% else %}<tr><td colspan="6" class="text-center" style="color:var(--muted);padding:24px;">No data</td></tr>{% endfor %}</tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+{% block js %}
+<script>
+const trend={{ data.trend|tojson }};
+new Chart(document.getElementById('trendChart'),{type:'bar',data:{labels:trend.map(r=>r.day),datasets:[{label:'Entries',data:trend.map(r=>r.n),backgroundColor:'rgba(29,111,232,.55)',borderColor:'#1d6fe8',borderWidth:1,borderRadius:5}]},options:{responsive:true,plugins:{legend:{display:false}},scales:{x:{ticks:{color:'#7b93b3',font:{size:10}},grid:{color:'rgba(255,255,255,.04)'}},y:{ticks:{color:'#7b93b3'},grid:{color:'rgba(255,255,255,.04)'},beginAtZero:true}}}});
+const pie={{ data.dept_today|tojson }};
+if(pie.length){const cols=['#1d6fe8','#00bcd4','#10b981','#f59e0b','#ef4444','#8b5cf6','#ec4899'];new Chart(document.getElementById('pieChart'),{type:'doughnut',data:{labels:pie.map(r=>r.dept||r.semester),datasets:[{data:pie.map(r=>r.n),backgroundColor:cols.slice(0,pie.length),borderColor:'#0f1c2e',borderWidth:3}]},options:{responsive:true,cutout:'62%',plugins:{legend:{position:'bottom',labels:{color:'#7b93b3',font:{size:10}}}}}})}
+</script>
+{% endblock %}
+
+
+------------------------------------------------reset.html-------------------------------------
+
+{% extends 'base.html' %}
+{% block title %}Reset Password{% endblock %}
+{% block auth %}
+<div class="auth-pg">
+  <div class="auth-box">
+    <div class="auth-ico"><i class="bi bi-lock-fill text-white"></i></div>
+    <h1 class="auth-h">Reset Password</h1>
+    <p class="auth-s">Create a new password for <strong>{{ email }}</strong> ({{ role }})</p>
+
+    {% with msgs=get_flashed_messages(with_categories=true) %}{% if msgs %}
+      {% for cat,msg in msgs %}
+      <div class="alert alert-{{ cat }} py-2 mb-3" style="font-size:.82rem;border-radius:9px;">{{ msg }}</div>
+      {% endfor %}
+    {% endif %}{% endwith %}
+
+    <form method="POST">
+      <div class="mb-3">
+        <label class="fl"><i class="bi bi-lock me-1"></i>New Password</label>
+        <input type="password" name="password" class="fi" placeholder="Min 6 characters" required minlength="6"/>
+      </div>
+      <div class="mb-4">
+        <label class="fl"><i class="bi bi-lock-fill me-1"></i>Confirm Password</label>
+        <input type="password" name="confirm" class="fi" placeholder="Repeat new password" required minlength="6"/>
+      </div>
+      <button type="submit" class="btn btn-p w-100 justify-content-center" style="padding:11px;">
+        <i class="bi bi-check2-circle"></i> Reset Password
+      </button>
+    </form>
+  </div>
+</div>
+{% endblock %}
+
+------------------------------------------------students.html-------------------------------------
+
+{% extends 'base.html' %}
+{% block title %}Students{% endblock %}
+{% block ptitle %}<i class="bi bi-mortarboard-fill me-2" style="color:var(--accent);"></i>Students{% endblock %}
+{% block content %}
+<div class="d-flex justify-content-between mb-3 flex-wrap gap-2">
+  <span style="color:var(--muted);font-size:.82rem;">{{ students|length }} student(s)</span>
+  {% if session.role=='admin' %}<a href="{{ url_for('admin_add_student') }}" class="btn btn-p sm"><i class="bi bi-person-plus-fill"></i> Add Student</a>{% endif %}
+</div>
+<div class="card mb-2"><input type="text" class="fi" placeholder="🔍 Search…" oninput="filt(this.value)"/></div>
+<!-- Mobile -->
+<div class="d-block d-md-none" id="mobCards">
+  {% for s in students %}
+  <div class="card mb-2 srow">
+    <div class="d-flex align-items-center gap-3">
+      <div class="av" style="width:48px;height:48px;">{% if s.photo_path %}<img src="{{ url_for('static',filename=s.photo_path) }}" alt=""/>{% else %}<i class="bi bi-person-fill"></i>{% endif %}</div>
+      <div style="flex:1;">
+        <div style="font-weight:700;">{{ s.name }}</div>
+        <div style="font-size:.74rem;color:var(--muted);">{{ s.roll_no }} · {{ s.dept }} · Sem {{ s.semester }}</div>
+        <div style="font-size:.72rem;color:var(--muted);">{{ s.email }}</div>
+      </div>
+      <div class="text-end">
+        {% if s.face_encoding %}<span class="b-ok"><i class="bi bi-check-circle me-1"></i>Face</span>
+        {% else %}<span class="b-no"><i class="bi bi-x-circle me-1"></i>No Face</span>{% endif %}
+        {% if session.role=='admin' %}
+        <br><a href="{{ url_for('admin_edit_student',sid=s.id) }}" class="btn btn-s xs mt-1"><i class="bi bi-pencil"></i></a>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+<!-- Desktop -->
+<div class="card d-none d-md-block">
+  <div class="table-responsive">
+    <table class="tbl" id="studTbl">
+      <thead><tr><th>#</th><th>Photo</th><th>Name</th><th>Roll No</th><th>Dept</th><th>Sem</th><th>Email</th><th>Face</th>{% if session.role=='admin' %}<th>Actions</th>{% endif %}</tr></thead>
+      <tbody>
+        {% for s in students %}
+        <tr>
+          <td style="color:var(--muted);">{{ loop.index }}</td>
+          <td><div class="av">{% if s.photo_path %}<img src="{{ url_for('static',filename=s.photo_path) }}" alt=""/>{% else %}<i class="bi bi-person-fill"></i>{% endif %}</div></td>
+          <td><strong>{{ s.name }}</strong></td>
+          <td><span class="b-blue">{{ s.roll_no }}</span></td>
+          <td style="font-size:.8rem;">{{ s.dept }}</td>
+          <td><span class="b-warn">{{ s.semester }}</span></td>
+          <td style="color:var(--muted);font-size:.78rem;">{{ s.email }}</td>
+          <td>{% if s.face_encoding %}<span class="b-ok">✔ Enrolled</span>{% else %}<span class="b-no">✗ Missing</span>{% endif %}</td>
+          {% if session.role=='admin' %}
+          <td>
+            <a href="{{ url_for('admin_edit_student',sid=s.id) }}" class="btn btn-s xs"><i class="bi bi-pencil-fill"></i></a>
+            <form method="POST" action="{{ url_for('admin_delete_student',sid=s.id) }}" style="display:inline;" onsubmit="return confirm('Delete {{ s.name }}?')">
+              <button type="submit" class="btn btn-r xs"><i class="bi bi-trash3-fill"></i></button>
+            </form>
+          </td>
+          {% endif %}
+        </tr>
+        {% else %}
+        <tr><td colspan="9" class="text-center" style="color:var(--muted);padding:28px;">No students found.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}
+{% block js %}
+<script>
+function filt(q){q=q.toLowerCase();document.querySelectorAll('#studTbl tbody tr,.srow').forEach(r=>{r.style.display=r.textContent.toLowerCase().includes(q)?'':'none';});}
+</script>
+{% endblock %}
+
+
+-----------------------------------------------style.css-----------------------------------------------------------------
+
+@import url('https://fonts.googleapis.com/css2?family=Syne:wght@400;700;800&family=DM+Sans:wght@300;400;500;600&display=swap');
+
+:root{
+  --bg:#060d1a;--surface:#0f1c2e;--card:#142236;--card2:#1a2d45;
+  --border:rgba(255,255,255,.07);--primary:#1d6fe8;--accent:#00bcd4;
+  --success:#10b981;--danger:#ef4444;--warn:#f59e0b;--purple:#8b5cf6;
+  --text:#e8f0fe;--muted:#7b93b3;--font:'DM Sans',sans-serif;
+  --radius:13px;--sw:252px;--th:58px;--shadow:0 12px 40px rgba(0,0,0,.5);
+}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth}
+body{font-family:var(--font);background:var(--bg);color:var(--text);min-height:100vh;overflow-x:hidden}
+a{text-decoration:none;color:inherit}
+img{max-width:100%}
+::-webkit-scrollbar{width:5px}
+::-webkit-scrollbar-track{background:var(--surface)}
+::-webkit-scrollbar-thumb{background:var(--card2);border-radius:3px}
+
+/* ── SIDEBAR ─────────────────────────────────────── */
+.sidebar{position:fixed;top:0;left:0;width:var(--sw);height:100vh;
+  background:var(--surface);border-right:1px solid var(--border);
+  display:flex;flex-direction:column;z-index:1050;
+  transition:transform .28s cubic-bezier(.4,0,.2,1),width .28s ease;overflow:hidden}
+.sb-brand{display:flex;align-items:center;gap:11px;padding:16px 14px;border-bottom:1px solid var(--border);flex-shrink:0}
+.sb-logo{width:36px;height:36px;border-radius:10px;flex-shrink:0;
+  background:linear-gradient(135deg,var(--primary),var(--accent));
+  display:flex;align-items:center;justify-content:center;font-size:1rem}
+.sb-title{font-family:'Syne',sans-serif;font-weight:800;font-size:.95rem;white-space:nowrap;line-height:1.1}
+.sb-sub{font-size:.62rem;color:var(--muted);white-space:nowrap}
+.sb-nav{flex:1;padding:10px 8px;overflow-y:auto;display:flex;flex-direction:column;gap:1px}
+.sb-label{font-size:.6rem;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);
+  padding:10px 10px 3px;font-weight:700}
+.nav-a{display:flex;align-items:center;gap:10px;padding:9px 10px;border-radius:9px;
+  color:var(--muted);font-size:.85rem;font-weight:500;white-space:nowrap;transition:all .2s}
+.nav-a i{font-size:1rem;flex-shrink:0;width:18px;text-align:center}
+.nav-a:hover{background:var(--card);color:var(--text)}
+.nav-a.on{background:linear-gradient(135deg,var(--primary),var(--accent));color:#fff}
+.sb-foot{padding:10px 12px;border-top:1px solid var(--border);flex-shrink:0}
+.sb-user{display:flex;align-items:center;gap:9px}
+.sb-av{width:34px;height:34px;border-radius:50%;flex-shrink:0;
+  background:var(--card2);border:2px solid var(--border);
+  overflow:hidden;display:flex;align-items:center;justify-content:center;font-size:.9rem;color:var(--accent)}
+.sb-av img{width:100%;height:100%;object-fit:cover}
+.sb-uname{font-size:.8rem;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sb-role{display:inline-block;font-size:.62rem;font-weight:700;padding:2px 7px;border-radius:4px;white-space:nowrap}
+.r-admin{background:rgba(29,111,232,.2);color:#60a5fa}
+.r-principal{background:rgba(139,92,246,.2);color:#a78bfa}
+.r-faculty{background:rgba(16,185,129,.2);color:#34d399}
+.r-student{background:rgba(245,158,11,.2);color:#fbbf24}
+.sb-acts{display:flex;gap:4px;margin-top:6px}
+.sb-btn{background:none;border:none;color:var(--muted);font-size:.9rem;cursor:pointer;
+  padding:5px 7px;border-radius:7px;transition:all .2s;display:flex;align-items:center;gap:4px;font-size:.75rem}
+.sb-btn:hover{background:var(--card);color:var(--text)}
+.sb-btn.red:hover{background:rgba(239,68,68,.15);color:var(--danger)}
+
+/* ── OVERLAY ─────────────────────────────────────── */
+.ov{display:none;position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:1040;backdrop-filter:blur(3px)}
+.ov.show{display:block}
+
+/* ── MAIN ────────────────────────────────────────── */
+.main{margin-left:var(--sw);min-height:100vh;display:flex;flex-direction:column;transition:margin-left .28s ease}
+
+/* ── TOPBAR ──────────────────────────────────────── */
+.topbar{height:var(--th);background:var(--surface);border-bottom:1px solid var(--border);
+  display:flex;align-items:center;padding:0 16px;gap:10px;position:sticky;top:0;z-index:900;flex-shrink:0}
+.tog{background:none;border:none;color:var(--muted);font-size:1.3rem;cursor:pointer;padding:6px;border-radius:8px;transition:all .2s}
+.tog:hover{background:var(--card);color:var(--text)}
+.tb-title{font-family:'Syne',sans-serif;font-weight:700;font-size:.95rem;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tb-right{display:flex;align-items:center;gap:7px}
+.clk{font-size:.72rem;color:var(--muted);background:var(--card);padding:4px 10px;border-radius:20px;display:flex;align-items:center;gap:4px;white-space:nowrap}
+
+/* ── CONTENT ─────────────────────────────────────── */
+.content{padding:18px;flex:1}
+
+/* ── CARDS ───────────────────────────────────────── */
+.card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:18px}
+.stat{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:16px;
+  display:flex;align-items:center;gap:13px;transition:transform .2s,box-shadow .2s}
+.stat:hover{transform:translateY(-2px);box-shadow:var(--shadow)}
+.s-ic{width:46px;height:46px;border-radius:11px;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:1.25rem}
+.s-lb{font-size:.72rem;color:var(--muted);margin-bottom:1px}
+.s-val{font-family:'Syne',sans-serif;font-size:1.5rem;font-weight:800;line-height:1}
+.s-sub{font-size:.68rem;color:var(--muted);margin-top:1px}
+
+/* ── TABLE ───────────────────────────────────────── */
+.tbl{width:100%;border-collapse:separate;border-spacing:0;color:var(--text)}
+.tbl thead th{background:var(--card2);color:var(--muted);font-size:.72rem;
+  text-transform:uppercase;letter-spacing:.05em;padding:9px 13px;border:none;white-space:nowrap}
+.tbl thead th:first-child{border-radius:8px 0 0 8px}
+.tbl thead th:last-child{border-radius:0 8px 8px 0}
+.tbl tbody td{background:var(--card);padding:10px 13px;border:none;border-top:1px solid var(--border);font-size:.83rem;vertical-align:middle}
+.tbl tbody tr:hover td{background:rgba(255,255,255,.025)}
+
+/* ── AVATAR ──────────────────────────────────────── */
+.av{width:38px;height:38px;border-radius:50%;flex-shrink:0;background:var(--card2);
+  border:2px solid var(--border);overflow:hidden;display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:1rem}
+.av img{width:100%;height:100%;object-fit:cover}
+.av-lg{width:72px;height:72px;border-radius:50%;flex-shrink:0;background:var(--card2);
+  border:3px solid var(--border);overflow:hidden;display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:2rem}
+.av-lg img{width:100%;height:100%;object-fit:cover}
+
+/* ── BADGES ──────────────────────────────────────── */
+.b-ok {background:rgba(16,185,129,.12);color:#10b981;padding:3px 9px;border-radius:20px;font-size:.7rem;font-weight:700}
+.b-no {background:rgba(239,68,68,.12);color:#ef4444;padding:3px 9px;border-radius:20px;font-size:.7rem;font-weight:700}
+.b-warn{background:rgba(245,158,11,.12);color:#f59e0b;padding:3px 9px;border-radius:20px;font-size:.7rem;font-weight:700}
+.b-blue{background:rgba(29,111,232,.12);color:#60a5fa;padding:3px 9px;border-radius:20px;font-size:.7rem;font-weight:700}
+.b-pur{background:rgba(139,92,246,.12);color:#a78bfa;padding:3px 9px;border-radius:20px;font-size:.7rem;font-weight:700}
+
+/* ── BTNS ────────────────────────────────────────── */
+.btn{display:inline-flex;align-items:center;gap:6px;padding:8px 16px;border-radius:9px;border:none;cursor:pointer;font-size:.84rem;font-weight:600;transition:opacity .2s,transform .15s;text-decoration:none}
+.btn:hover{opacity:.88;transform:translateY(-1px)}
+.btn-p{background:linear-gradient(135deg,var(--primary),var(--accent));color:#fff}
+.btn-g{background:linear-gradient(135deg,#10b981,#059669);color:#fff}
+.btn-r{background:rgba(239,68,68,.13);color:#ef4444;border:1px solid rgba(239,68,68,.2)}
+.btn-y{background:linear-gradient(135deg,#f59e0b,#d97706);color:#fff}
+.btn-s{background:var(--card2);color:var(--text);border:1px solid var(--border)}
+.btn-pur{background:linear-gradient(135deg,#8b5cf6,#6d28d9);color:#fff}
+.btn.sm{padding:5px 11px;font-size:.76rem;border-radius:7px}
+.btn.xs{padding:3px 8px;font-size:.7rem;border-radius:6px}
+
+/* ── FORMS ───────────────────────────────────────── */
+.fi{background:var(--card2)!important;color:var(--text)!important;border:1px solid var(--border)!important;
+  border-radius:9px;padding:9px 13px;width:100%;font-family:var(--font);font-size:.88rem;transition:border-color .2s}
+.fi:focus{border-color:var(--primary)!important;outline:none;box-shadow:0 0 0 3px rgba(29,111,232,.18)!important}
+.fi option{background:var(--card2)}
+.fl{font-size:.78rem;color:var(--muted);font-weight:500;margin-bottom:4px;display:block}
+
+/* ── CAMERA ──────────────────────────────────────── */
+.cam-box{background:var(--bg);border:2px dashed var(--border);border-radius:var(--radius);
+  overflow:hidden;position:relative;aspect-ratio:4/3}
+.cam-box video,.cam-box canvas{width:100%;height:100%;object-fit:cover}
+.cam-ov{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;
+  justify-content:center;background:rgba(0,0,0,.75);color:var(--muted);gap:8px}
+.face-box{position:absolute;width:170px;height:170px;top:50%;left:50%;transform:translate(-50%,-50%);pointer-events:none}
+.face-box::before,.face-box::after,.face-box span::before,.face-box span::after
+  {content:'';position:absolute;width:20px;height:20px;border-color:var(--accent);border-style:solid}
+.face-box::before{top:0;left:0;border-width:2.5px 0 0 2.5px}
+.face-box::after{top:0;right:0;border-width:2.5px 2.5px 0 0}
+.face-box span::before{bottom:0;left:0;border-width:0 0 2.5px 2.5px}
+.face-box span::after{bottom:0;right:0;border-width:0 2.5px 2.5px 0}
+.scan{position:absolute;left:0;right:0;height:2px;
+  background:linear-gradient(90deg,transparent,var(--accent),transparent);animation:sc 2.2s linear infinite}
+@keyframes sc{0%{top:10%}100%{top:90%}}
+
+/* ── RESULT ──────────────────────────────────────── */
+.res{border-radius:11px;padding:11px 13px;margin-bottom:7px;display:flex;align-items:center;gap:11px;animation:si .3s ease}
+@keyframes si{from{opacity:0;transform:translateX(14px)}to{opacity:1;transform:translateX(0)}}
+.res.ok{background:rgba(16,185,129,.09);border:1px solid rgba(16,185,129,.22)}
+.res.wa{background:rgba(245,158,11,.09);border:1px solid rgba(245,158,11,.22)}
+.res.er{background:rgba(239,68,68,.09);border:1px solid rgba(239,68,68,.22)}
+.res-av{width:36px;height:36px;border-radius:50%;overflow:hidden;flex-shrink:0;background:var(--card2);display:flex;align-items:center;justify-content:center;color:var(--muted)}
+.res-av img{width:100%;height:100%;object-fit:cover}
+
+/* ── CONF BAR ────────────────────────────────────── */
+.cbar{height:4px;border-radius:2px;background:var(--card2)}
+.cfill{height:100%;border-radius:2px;background:linear-gradient(90deg,var(--primary),var(--accent))}
+
+/* ── THUMB ───────────────────────────────────────── */
+.thumbs{display:flex;flex-wrap:wrap;gap:5px;margin-top:7px}
+.thumbs img{width:58px;height:58px;border-radius:7px;object-fit:cover;border:2px solid var(--border)}
+
+/* ── AUTH ────────────────────────────────────────── */
+.auth-pg{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:14px;
+  background:radial-gradient(ellipse at 65% 15%,rgba(29,111,232,.14) 0%,transparent 55%),
+             radial-gradient(ellipse at 15% 85%,rgba(0,188,212,.09) 0%,transparent 50%),var(--bg)}
+.auth-box{width:100%;max-width:460px;background:var(--card);border:1px solid var(--border);
+  border-radius:18px;padding:28px;box-shadow:var(--shadow)}
+.auth-ico{width:48px;height:48px;border-radius:13px;background:linear-gradient(135deg,var(--primary),var(--accent));
+  display:flex;align-items:center;justify-content:center;font-size:1.4rem;margin:0 auto 14px}
+.auth-h{font-family:'Syne',sans-serif;font-size:1.4rem;font-weight:800;text-align:center;margin-bottom:2px}
+.auth-s{color:var(--muted);text-align:center;font-size:.82rem;margin-bottom:20px}
+
+.rtabs{display:flex;gap:5px;background:var(--card2);padding:4px;border-radius:11px;margin-bottom:18px;flex-wrap:wrap}
+.rtab{flex:1;min-width:70px;padding:7px 5px;border-radius:8px;border:none;background:none;color:var(--muted);
+  font-size:.73rem;font-weight:600;cursor:pointer;transition:all .2s;text-align:center}
+.rtab i{display:block;font-size:1rem;margin-bottom:2px}
+.rtab.on{background:linear-gradient(135deg,var(--primary),var(--accent));color:#fff}
+
+/* ── SERVER BANNER ───────────────────────────────── */
+.srv{background:linear-gradient(135deg,rgba(16,185,129,.08),rgba(0,188,212,.06));
+  border:1px solid rgba(16,185,129,.18);border-radius:11px;padding:11px 14px;
+  display:flex;align-items:center;gap:11px;flex-wrap:wrap;margin-bottom:14px}
+.srv-url{font-family:monospace;font-size:.85rem;color:#34d399;font-weight:700}
+
+/* ── PROFILE CARD ────────────────────────────────── */
+.pcard{background:linear-gradient(135deg,rgba(29,111,232,.1),rgba(0,188,212,.07));
+  border:1px solid rgba(29,111,232,.18);border-radius:16px;padding:22px;
+  display:flex;align-items:center;gap:18px;flex-wrap:wrap}
+
+/* ═══════════ RESPONSIVE ═══════════ */
+@media(max-width:768px){
+  .sidebar{transform:translateX(-100%);width:260px!important;box-shadow:var(--shadow)}
+  .sidebar.open{transform:translateX(0)}
+  .main{margin-left:0!important}
+  .content{padding:12px}
+  .topbar{padding:0 12px}
+  .clk{display:none}
+  .hide-m{display:none!important}
+  .tbl thead th,.tbl tbody td{padding:8px 9px;font-size:.78rem}
+  .auth-box{padding:18px}
+  .rtab{min-width:60px;font-size:.68rem}
+  .cam-box{aspect-ratio:4/3;max-height:260px}
+  .pcard{flex-direction:column;align-items:flex-start}
+}
+@media(max-width:480px){
+  .rtab{min-width:48px;padding:6px 3px;font-size:.64rem}
+  .auth-box{padding:14px}
+}
+
+/* Desktop collapse */
+.sidebar.col .sb-title,.sidebar.col .sb-sub,
+.sidebar.col .nav-a span,.sidebar.col .sb-label,
+.sidebar.col .sb-uname,.sidebar.col .sb-role,
+.sidebar.col .sb-acts span{display:none}
+.sidebar.col{width:62px}
+.main.col{margin-left:62px}
+
+
+-------------------------------------------------------cam.js---------------------------------------------------------------------------------------------
+
+/**
+ * FAS Camera Module — works on desktop & mobile
+ * Usage: new FASCam(options)
+ */
+class FASCam {
+  constructor(opts) {
+    this.videoEl   = document.getElementById(opts.videoId || 'video');
+    this.canvasEl  = document.getElementById(opts.canvasId || 'snapCanvas');
+    this.overlayEl = document.getElementById(opts.overlayId || 'camOverlay');
+    this.fboxEl    = document.getElementById(opts.fboxId || 'faceBox');
+    this.scanEl    = document.getElementById(opts.scanId || 'scanLine');
+    this.stream    = null;
+    this.onCapture = opts.onCapture || null; // callback(dataUrl)
+  }
+
+  async start() {
+    const constraints = {
+      video: {
+        facingMode: 'user',
+        width: { ideal: 1280 },
+        height: { ideal: 720 }
+      },
+      audio: false
+    };
+    try {
+      this.stream = await navigator.mediaDevices.getUserMedia(constraints);
+      this.videoEl.srcObject = this.stream;
+      await this.videoEl.play();
+      if (this.overlayEl) this.overlayEl.style.display = 'none';
+      if (this.fboxEl)    this.fboxEl.style.display = 'block';
+      if (this.scanEl)    this.scanEl.style.display  = 'block';
+      return true;
+    } catch (e) {
+      alert('Camera error: ' + e.message + '\n\nMake sure:\n1. You allowed camera access\n2. No other app is using camera\n3. Using HTTPS or localhost');
+      return false;
+    }
+  }
+
+  stop() {
+    if (this.stream) {
+      this.stream.getTracks().forEach(t => t.stop());
+      this.stream = null;
+    }
+    this.videoEl.srcObject = null;
+    if (this.overlayEl) this.overlayEl.style.display = 'flex';
+    if (this.fboxEl)    this.fboxEl.style.display = 'none';
+    if (this.scanEl)    this.scanEl.style.display  = 'none';
+  }
+
+  capture() {
+    if (!this.stream) return null;
+    const c = this.canvasEl;
+    c.width  = this.videoEl.videoWidth  || 640;
+    c.height = this.videoEl.videoHeight || 480;
+    c.getContext('2d').drawImage(this.videoEl, 0, 0);
+    const dataUrl = c.toDataURL('image/jpeg', 0.88);
+    if (this.onCapture) this.onCapture(dataUrl);
+    return dataUrl;
+  }
+
+  isActive() { return !!this.stream; }
+}

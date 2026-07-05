@@ -1,0 +1,280 @@
+{% extends 'base.html' %}
+{% block title %}Mark Attendance{% endblock %}
+{% block ptitle %}
+  <i class="bi bi-camera-video-fill me-2" style="color:var(--accent);"></i>Mark Student Attendance
+{% endblock %}
+
+{% block content %}
+<div class="row g-3">
+  <!-- Camera Panel -->
+  <div class="col-lg-7">
+    <div class="card">
+      <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+        <h6 class="mb-0" style="font-family:'Syne',sans-serif;font-weight:700;color:#ffffff;">📷 Live Camera</h6>
+        <span id="camSt" class="b-warn">Not Started</span>
+      </div>
+
+      <!-- Camera box -->
+      <div class="cam-box mb-3" id="camBox">
+        <video id="video" autoplay muted playsinline style="width:100%;height:100%;object-fit:cover;"></video>
+        <canvas id="snapCanvas" style="display:none;"></canvas>
+        <div class="cam-ov" id="camOverlay">
+          <i class="bi bi-camera-video-off" style="font-size:2.5rem;opacity:.4;"></i>
+          <span style="font-size:.85rem;">Tap "Start Camera" below</span>
+          <span style="font-size:.75rem;color:var(--muted);">Allow camera permission when asked</span>
+        </div>
+        <div class="face-box" id="faceBox" style="display:none;"><span></span></div>
+        <div class="scan" id="scanLine" style="display:none;"></div>
+      </div>
+
+      <!-- Controls -->
+      <div class="d-flex gap-2 flex-wrap">
+        <button id="startBtn" class="btn btn-p">
+          <i class="bi bi-camera-video-fill"></i> Start Camera
+        </button>
+        <button id="captureBtn" class="btn btn-g" style="display:none;">
+          <i class="bi bi-person-bounding-box"></i> Recognize
+        </button>
+        <button id="autoBtn" class="btn btn-pur" style="display:none;" title="Auto-recognize every 3s">
+          <i class="bi bi-play-circle-fill"></i> Auto (3s)
+        </button>
+        <button id="stopBtn" class="btn btn-r" style="display:none;">
+          <i class="bi bi-stop-fill"></i> Stop
+        </button>
+      </div>
+
+      <!-- Info -->
+      <div style="margin-top:12px;font-size:.75rem;color:var(--muted);line-height:1.8;">
+        <div><i class="bi bi-info-circle me-1"></i>
+          {% if session.role=='faculty' %}Recognizes <strong>students</strong> in your department ({{ session.dept }}).
+          {% else %}Recognizes <strong>all students</strong> with registered faces.{% endif %}
+        </div>
+        <div><i class="bi bi-shield-check me-1"></i>Confidence threshold: 55% (lower = stricter matching)</div>
+        <div><i class="bi bi-clock me-1"></i>Duplicate prevention: 2-hour window per person</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Results -->
+  <div class="col-lg-5">
+    <!-- Session counter -->
+    <div class="card mb-3 d-flex align-items-center justify-content-between flex-wrap py-3 px-4" style="flex-direction:row;">
+      <div><strong id="cMark" style="color:var(--success);font-size:1.25rem;">0</strong><br><span style="color:var(--muted);font-size:.7rem;text-transform:uppercase;letter-spacing:0.5px;">Marked</span></div>
+      <div><strong id="cDupe" style="color:var(--warn);font-size:1.25rem;">0</strong><br><span style="color:var(--muted);font-size:.7rem;text-transform:uppercase;letter-spacing:0.5px;">Already</span></div>
+      <div><strong id="cUnk" style="color:var(--danger);font-size:1.25rem;">0</strong><br><span style="color:var(--muted);font-size:.7rem;text-transform:uppercase;letter-spacing:0.5px;">Unknown</span></div>
+    </div>
+    
+    <div class="card" style="min-height:300px;">
+      <div class="d-flex justify-content-between align-items-center mb-3">
+        <h6 class="mb-0" style="font-family:'Syne',sans-serif;font-weight:700;color:#ffffff;">
+          <i class="bi bi-check2-circle me-2" style="color:var(--success);"></i>Recognition Results
+        </h6>
+        <button onclick="clearRes()" class="btn btn-s xs"><i class="bi bi-trash3"></i></button>
+      </div>
+      <div id="results" style="max-height:400px;overflow-y:auto;">
+        <div id="noRes" class="text-center" style="padding:36px 0;color:var(--muted);">
+          <i class="bi bi-person-bounding-box" style="font-size:2.5rem;display:block;margin-bottom:10px;opacity:.35;"></i>
+          Start camera and capture to recognize
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block js %}
+<script src="{{ url_for('static',filename='js/cam.js') }}"></script>
+<script>
+let cam=null, autoT=null, mk=0, du=0, un=0;
+const camSt   = document.getElementById('camSt');
+const startBtn = document.getElementById('startBtn');
+const captureBtn=document.getElementById('captureBtn');
+const autoBtn  = document.getElementById('autoBtn');
+const stopBtn  = document.getElementById('stopBtn');
+
+// ✅ FAST START - with better configuration
+startBtn.addEventListener('click', async () => {
+  camSt.textContent = 'Starting...';
+  camSt.className = 'b-warn';
+  
+  // Show loading indicator
+  const overlay = document.getElementById('camOverlay');
+  if(overlay) overlay.style.display = 'flex';
+  
+  cam = new FASCam({
+    videoId: 'video',
+    canvasId: 'snapCanvas', 
+    overlayId: 'camOverlay',
+    fboxId: 'faceBox',
+    scanId: 'scanLine'
+  });
+  
+  const ok = await cam.start();
+  if (ok) {
+    camSt.textContent = 'Active';
+    camSt.className = 'b-ok';
+    startBtn.style.display = 'none';
+    captureBtn.style.display = '';
+    autoBtn.style.display = '';
+    stopBtn.style.display = '';
+    
+    // Hide overlay after camera starts
+    setTimeout(() => {
+      if(overlay) overlay.style.display = 'none';
+    }, 500);
+  } else {
+    camSt.textContent = 'Failed';
+    camSt.className = 'b-no';
+    alert('Camera failed to start. Please check permissions.');
+  }
+});
+
+stopBtn.addEventListener('click', stopAll);
+function stopAll(){
+  if(autoT){
+    clearInterval(autoT);
+    autoT = null;
+    autoBtn.innerHTML = '<i class="bi bi-play-circle-fill"></i> Auto (3s)';
+    autoBtn.className = 'btn btn-pur';
+  }
+  if(cam) {
+    cam.stop();
+    cam = null;
+  }
+  camSt.textContent = 'Stopped';
+  camSt.className = 'b-no';
+  startBtn.style.display = '';
+  captureBtn.style.display = 'none';
+  autoBtn.style.display = 'none';
+  stopBtn.style.display = 'none';
+  
+  // Show overlay again
+  const overlay = document.getElementById('camOverlay');
+  if(overlay) overlay.style.display = 'flex';
+}
+
+captureBtn.addEventListener('click', doCapture);
+
+autoBtn.addEventListener('click', ()=>{
+  if(autoT){
+    clearInterval(autoT);
+    autoT = null;
+    autoBtn.innerHTML = '<i class="bi bi-play-circle-fill"></i> Auto (3s)';
+    autoBtn.className = 'btn btn-pur';
+  } else {
+    autoT = setInterval(doCapture, 3000);
+    autoBtn.innerHTML = '<i class="bi bi-stop-circle-fill"></i> Stop Auto';
+    autoBtn.className = 'btn btn-r';
+    doCapture(); // Capture immediately
+  }
+});
+
+async function doCapture(){
+  if(!cam || !cam.isActive()){
+    stopAll();
+    return;
+  }
+  
+  const url = cam.capture();
+  if(!url) return;
+  
+  camSt.textContent = 'Recognizing...';
+  camSt.className = 'b-warn';
+  
+  try {
+    const res = await fetch('/api/recognize', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({image: url})
+    });
+    const data = await res.json();
+    handleData(data);
+  } catch(e) {
+    console.error(e);
+    addRes('er', 'bi-x-circle', 'Error', 'Network issue', '');
+  }
+  camSt.textContent = 'Active';
+  camSt.className = 'b-ok';
+}
+
+function handleData(d){
+  if(d.status === 'no_face'){
+    addRes('er', 'bi-question-circle', 'No Face', 'No face detected in frame', '');
+    un++;
+    upd();
+    return;
+  }
+  if(d.status === 'error'){
+    addRes('er', 'bi-x-circle', 'Error', d.message || 'Unknown error', '');
+    return;
+  }
+  
+  (d.results || []).forEach(r => {
+    if(r.status === 'marked'){
+      addRes('ok', 'bi-check-circle-fill', r.name, `${r.roll_no} · ${r.dept}${r.sem ? ' · Sem '+r.sem : ''}`, r.confidence+'%', r.photo);
+      mk++;
+      upd();
+    } else if(r.status === 'already'){
+      addRes('wa', 'bi-clock-history', r.name, `Already marked · ${r.roll_no}`, r.confidence+'%', r.photo);
+      du++;
+      upd();
+    } else {
+      addRes('er', 'bi-person-x-fill', 'Unknown', 'Face not recognised', '');
+      un++;
+      upd();
+    }
+  });
+}
+
+function addRes(type, ico, name, sub, conf, photo){
+  const noRes = document.getElementById('noRes');
+  if(noRes) noRes.style.display = 'none';
+  
+  const ts = new Date().toLocaleTimeString('en-IN', {hour:'2-digit', minute:'2-digit', second:'2-digit'});
+  const avHtml = photo 
+    ? `<div class="res-av"><img src="/static/${photo}" alt=""/></div>`
+    : `<div class="res-av"><i class="bi ${ico}"></i></div>`;
+  
+  const d = document.createElement('div');
+  d.className = 'res ' + type;
+  d.innerHTML = `${avHtml}<div style="flex:1;min-width:0;"><div style="font-weight:700;font-size:.88rem;">${escapeHtml(name)}</div><div style="font-size:.74rem;color:var(--muted);">${escapeHtml(sub)}</div></div><div style="text-align:right;flex-shrink:0;">${conf ? `<div style="font-size:.8rem;font-weight:700;color:var(--success);">${conf}</div>` : ''}<div style="font-size:.7rem;color:var(--muted);">${ts}</div></div>`;
+  
+  const results = document.getElementById('results');
+  if(results) results.insertBefore(d, results.firstChild);
+  
+  // Limit to 50 results
+  while(results && results.children.length > 50) {
+    results.removeChild(results.lastChild);
+  }
+}
+
+// Helper function to escape HTML
+function escapeHtml(str) {
+  if(!str) return '';
+  return str.replace(/[&<>]/g, function(m) {
+    if(m === '&') return '&amp;';
+    if(m === '<') return '&lt;';
+    if(m === '>') return '&gt;';
+    return m;
+  });
+}
+
+function clearRes(){
+  const results = document.getElementById('results');
+  const noRes = document.getElementById('noRes');
+  if(results) {
+    results.innerHTML = '';
+    if(noRes) results.appendChild(noRes);
+  }
+  if(noRes) noRes.style.display = '';
+  mk = du = un = 0;
+  upd();
+}
+
+function upd(){
+  document.getElementById('cMark').textContent = mk;
+  document.getElementById('cDupe').textContent = du;
+  document.getElementById('cUnk').textContent = un;
+}
+</script>
+{% endblock %}

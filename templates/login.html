@@ -1,0 +1,89 @@
+{% extends 'base.html' %}
+{% block title %}Login{% endblock %}
+{% block auth %}
+<div class="auth-pg">
+  <div class="auth-box">
+    <div class="auth-ico"><i class="bi bi-person-bounding-box text-white"></i></div>
+    <h1 class="auth-h">FaceAttend</h1>
+    <p class="auth-s">Face Recognition Attendance System</p>
+
+    {% with msgs=get_flashed_messages(with_categories=true) %}{% if msgs %}
+      {% for cat,msg in msgs %}
+      <div class="alert alert-{{ cat }} py-2 mb-3" style="font-size:.82rem;border-radius:9px;">{{ msg }}</div>
+      {% endfor %}
+    {% endif %}{% endwith %}
+
+    <div class="rtabs" id="rtabs">
+      <button class="rtab on" onclick="setRole(this,'student')"><i class="bi bi-mortarboard-fill"></i>Student</button>
+      <button class="rtab" onclick="setRole(this,'faculty')"><i class="bi bi-person-workspace"></i>Faculty</button>
+      <button class="rtab" onclick="setRole(this,'admin')"><i class="bi bi-shield-fill-check"></i>Admin</button>
+    
+    </div>
+
+    <form method="POST" onsubmit="return validateLogin()">
+      <input type="hidden" name="role" id="roleInput" value="student"/>
+      <div class="mb-3">
+        <label class="fl"><i class="bi bi-envelope me-1"></i>Email / Username</label>
+        <input type="text" name="email" id="emailInput" class="fi" placeholder="Enter email or username" required autocomplete="username"/>
+      </div>
+      <div class="mb-3">
+        <label class="fl"><i class="bi bi-lock me-1"></i>Password</label>
+        <div style="position:relative;">
+          <input type="password" name="password" id="pw" class="fi" placeholder="Enter password" required autocomplete="current-password"/>
+          <button type="button" onclick="togglePw()" style="position:absolute;right:11px;top:50%;transform:translateY(-50%);background:none;border:none;color:var(--muted);cursor:pointer;font-size:1rem;">
+            <i class="bi bi-eye" id="eyeI"></i>
+          </button>
+        </div>
+      </div>
+      
+      <div id="loginError" class="alert alert-danger py-2 mb-3" style="display:none;font-size:.82rem;border-radius:9px;"></div>
+      
+      <button type="submit" id="logBtn" class="btn btn-p w-100 justify-content-center" style="padding:11px;font-size:.95rem;">
+        <i class="bi bi-box-arrow-in-right"></i> Login
+      </button>
+    </form>
+
+    <div class="d-flex justify-content-between mt-3 flex-wrap gap-1" style="font-size:.8rem;">
+      <a href="{{ url_for('forgot') }}" style="color:var(--accent);">Forgot Password?</a>
+      <a href="{{ url_for('register') }}" style="color:var(--accent);">New Registration →</a>
+    </div>
+
+    <div style="margin-top:18px;background:var(--card2);border-radius:9px;padding:11px;font-size:.72rem;color:var(--muted);">
+      <div style="font-weight:700;color:var(--text);margin-bottom:5px;"><i class="bi bi-key me-1"></i>Default Credentials</div>
+      <div style="margin-top:3px;font-style:italic;">Register Students via "New Registration"</div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+{% block js %}
+<script>
+function setRole(btn,role){
+  document.querySelectorAll('.rtab').forEach(b=>b.classList.remove('on'));
+  btn.classList.add('on');
+  document.getElementById('roleInput').value=role;
+}
+function togglePw(){
+  const pw=document.getElementById('pw'),ic=document.getElementById('eyeI');
+  pw.type=pw.type==='password'?'text':'password';
+  ic.className='bi bi-eye'+(pw.type==='text'?'-slash':'');
+}
+function validateLogin() {
+  const email = document.getElementById('emailInput').value.trim();
+  const pw = document.getElementById('pw').value.trim();
+  const errDiv = document.getElementById('loginError');
+  errDiv.style.display = 'none';
+
+  if (!email || !pw) {
+    errDiv.innerHTML = '<i class="bi bi-exclamation-triangle-fill me-1"></i>Email and Password are required.';
+    errDiv.style.display = 'block';
+    return false;
+  }
+  
+  const btn = document.getElementById('logBtn');
+  btn.innerHTML = '<i class="bi bi-hourglass-split"></i> Logging in...';
+  btn.style.opacity = '0.7';
+  btn.disabled = true;
+  return true;
+}
+</script>
+{% endblock %}

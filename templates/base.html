@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width,initial-scale=1,maximum-scale=1"
+    />
+    <meta name="theme-color" content="#0f1c2e" />
+    <title>{% block title %}FAS{% endblock %} | Face Attendance</title>
+    <link
+      href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css"
+      rel="stylesheet"
+    />
+    <link
+      href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css"
+      rel="stylesheet"
+    />
+    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link
+      href="{{ url_for('static',filename='css/style.css') }}"
+      rel="stylesheet"
+    />
+    {% block head %}{% endblock %}
+  </head>
+  <body>
+    {% if session.uid %}
+    <div class="ov" id="ov"></div>
+    <!-- ── Sidebar ─────────────────────────────────── -->
+    <aside class="sidebar" id="sb">
+      <div class="sb-brand">
+        <div class="sb-logo">
+          
+          <i class="bi bi-person-bounding-box text-white"></i>
+        </div>
+        <div>
+          <div class="sb-title">FaceAttend</div>
+          <div class="sb-sub">Face Attendance System Recognition</div>
+        </div>
+      </div>
+      <nav class="sb-nav">
+        <a
+          href="{{ url_for('dashboard') }}"
+          class="nav-a {% if req=='dashboard' %}on{% endif %}"
+        >
+          <i class="bi bi-grid-1x2-fill"></i><span>Dashboard</span>
+        </a>
+
+        {% if session.role in ['admin','faculty'] %}
+        <div class="sb-label">Attendance</div>
+        <a
+          href="{{ url_for('mark') }}"
+          class="nav-a {% if req=='mark' %}on{% endif %}"
+        >
+          <i class="bi bi-camera-video-fill"></i><span> Mark Attendance </span>
+        </a>
+        {% endif %} {% if session.role in ['admin','faculty'] %}
+        <a
+          href="{{ url_for('students') }}"
+          class="nav-a {% if req=='students' %}on{% endif %}"
+        >
+          <i class="bi bi-mortarboard-fill"></i><span>Students</span>
+        </a>
+        {% endif %}
+
+        <a
+          href="{{ url_for('attendance') }}"
+          class="nav-a {% if req=='attendance' %}on{% endif %}"
+        >
+          <i class="bi bi-calendar-check-fill"></i
+          ><span>
+            {% if session.role=='student' %}My Attendance{% else %}Student
+            Records{% endif %}
+          </span>
+        </a>
+
+        {% if session.role in ['admin','faculty'] %}
+        <a
+          href="{{ url_for('reports') }}"
+          class="nav-a {% if req=='reports' %}on{% endif %}"
+        >
+          <i class="bi bi-bar-chart-fill"></i><span>Reports</span>
+        </a>
+        {% endif %} {% if session.role=='admin' %}
+        <div class="sb-label">Admin Panel</div>
+        <a
+          href="{{ url_for('admin_students') }}"
+          class="nav-a {% if 'admin_student' in req %}on{% endif %}"
+        >
+          <i class="bi bi-people-fill"></i><span>Manage Students</span>
+        </a>
+        <a
+          href="{{ url_for('admin_faculty') }}"
+          class="nav-a {% if 'admin_faculty' in req %}on{% endif %}"
+        >
+          <i class="bi bi-person-badge-fill"></i><span>Manage Faculty</span>
+        </a>
+
+        {% endif %}
+
+        <div class="sb-label">Account</div>
+        <a
+          href="{{ url_for('profile') }}"
+          class="nav-a {% if req=='profile' %}on{% endif %}"
+        >
+          <i class="bi bi-person-circle"></i><span>My Profile</span>
+        </a>
+      </nav>
+
+      <div class="sb-foot">
+        <div class="sb-user">
+          <div class="sb-av">
+            {% if session.photo %}<img
+              src="{{ url_for('static',filename=session.photo) }}"
+              alt=""
+            />
+            {% else %}<i class="bi bi-person-fill"></i>{% endif %}
+          </div>
+          <div style="flex: 1; min-width: 0">
+            <div class="sb-uname">{{ session.name }}</div>
+            <span class="sb-role r-{{ session.role }}"
+              >{{ session.role|title }}</span
+            >
+          </div>
+        </div>
+        <div class="sb-acts mt-2">
+          <a
+            href="{{ url_for('switch') }}"
+            class="sb-btn"
+            title="Switch Account"
+          >
+            <i class="bi bi-arrow-left-right"></i><span>Switch</span>
+          </a>
+          <a href="{{ url_for('logout') }}" class="sb-btn red" title="Logout">
+            <i class="bi bi-box-arrow-right"></i><span>Logout</span>
+          </a>
+        </div>
+      </div>
+    </aside>
+
+    <!-- ── Main ────────────────────────────────────── -->
+    <div class="main" id="main">
+      <header class="topbar">
+        <button class="tog" id="tog"><i class="bi bi-list"></i></button>
+        <div class="tb-title">{% block ptitle %}{% endblock %}</div>
+        <div class="tb-right">
+          <span class="clk hide-m"
+            ><i class="bi bi-calendar3"></i> <span id="clkD"></span
+          ></span>
+          <span class="clk"
+            ><i class="bi bi-clock"></i> <span id="clkT"></span
+          ></span>
+        </div>
+      </header>
+
+      <div class="px-3 pt-2">
+        {% with msgs=get_flashed_messages(with_categories=true) %}{% if msgs %}
+        {% for cat,msg in msgs %}
+        <div
+          class="alert alert-{{ cat }} alert-dismissible fade show mb-2 py-2"
+          style="font-size: 0.84rem; border-radius: 9px"
+        >
+          <i class="bi bi-info-circle me-1"></i>{{ msg }}
+          <button
+            type="button"
+            class="btn-close"
+            data-bs-dismiss="alert"
+          ></button>
+        </div>
+        {% endfor %} {% endif %}{% endwith %}
+      </div>
+
+      <main class="content">{% block content %}{% endblock %}</main>
+    </div>
+
+    {% else %} {% block auth %}{% endblock %} {% endif %}
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js"></script>
+    <script>
+      // Clock
+      (function tick() {
+        const now = new Date();
+        const d = document.getElementById("clkD"),
+          t = document.getElementById("clkT");
+        if (d)
+          d.textContent = now.toLocaleDateString("en-IN", {
+            weekday: "short",
+            day: "2-digit",
+            month: "short",
+          });
+        if (t)
+          t.textContent = now.toLocaleTimeString("en-IN", {
+            hour: "2-digit",
+            minute: "2-digit",
+            second: "2-digit",
+          });
+        setTimeout(tick, 1000);
+      })();
+
+      // Sidebar
+      const sb = document.getElementById("sb"),
+        ov = document.getElementById("ov"),
+        tog = document.getElementById("tog"),
+        main = document.getElementById("main");
+      function openSb() {
+        if (window.innerWidth <= 768) {
+          sb && sb.classList.add("open");
+          ov && ov.classList.add("show");
+        } else {
+          sb && sb.classList.toggle("col");
+          main && main.classList.toggle("col");
+        }
+      }
+      tog && tog.addEventListener("click", openSb);
+      ov &&
+        ov.addEventListener("click", () => {
+          sb && sb.classList.remove("open");
+          ov.classList.remove("show");
+        });
+      document.querySelectorAll(".nav-a").forEach((a) =>
+        a.addEventListener("click", () => {
+          if (window.innerWidth <= 768) {
+            sb && sb.classList.remove("open");
+            ov && ov.classList.remove("show");
+          }
+        }),
+      );
+    </script>
+    {% block js %}{% endblock %}
+  </body>
+</html>

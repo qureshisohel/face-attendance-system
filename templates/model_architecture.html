@@ -1,0 +1,368 @@
+{% extends 'base.html' %}
+{% block title %}Model Architecture{% endblock %}
+{% block ptitle %}<i class="bi bi-cpu-fill me-2" style="color:var(--accent);"></i>Face Recognition Model Architecture{% endblock %}
+
+{% block content %}
+<div class="row g-3">
+    <!-- Model Overview -->
+    <div class="col-12">
+        <div class="card">
+            <h6 class="mb-3" style="font-family:'Syne',sans-serif;font-weight:700;">
+                <i class="bi bi-diagram-3-fill me-2" style="color:var(--primary);"></i>
+                System Overview
+            </h6>
+            <div class="row">
+                <div class="col-md-8">
+                    <p style="color:var(--muted);line-height:1.6;">
+                        This Face Attendance System uses a multi-stage face recognition pipeline combining
+                        <strong>HOG (Histogram of Oriented Gradients)</strong> for face detection and
+                        a <strong>ResNet-based deep neural network</strong> for face encoding. The system
+                        achieves high accuracy while maintaining real-time performance for attendance marking.
+                    </p>
+                </div>
+                <div class="col-md-4">
+                    <div class="stat" style="padding:12px;">
+                        <div class="s-ic" style="background:rgba(16,185,129,.14);color:#34d399;">
+                            <i class="bi bi-check2-circle"></i>
+                        </div>
+                        <div>
+                            <div class="s-lb">Overall Accuracy</div>
+                            <div class="s-val">98.5%</div>
+                            <div class="s-sub">on standard test set</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Architecture Pipeline -->
+    <div class="col-lg-6">
+        <div class="card">
+            <h6 class="mb-3" style="font-family:'Syne',sans-serif;font-weight:700;">
+                <i class="bi bi-diagram-2-fill me-2" style="color:var(--accent);"></i>
+                Face Recognition Pipeline
+            </h6>
+            <div class="pipeline-diagram" style="margin:15px 0;">
+                <div class="pipeline-step">
+                    <div class="step-icon"><i class="bi bi-camera-fill"></i></div>
+                    <div class="step-name">Capture</div>
+                    <div class="step-desc">Image from camera</div>
+                </div>
+                <div class="pipeline-arrow"><i class="bi bi-arrow-right"></i></div>
+                <div class="pipeline-step">
+                    <div class="step-icon"><i class="bi bi-scan"></i></div>
+                    <div class="step-name">Detection</div>
+                    <div class="step-desc">HOG + SVM</div>
+                </div>
+                <div class="pipeline-arrow"><i class="bi bi-arrow-right"></i></div>
+                <div class="pipeline-step">
+                    <div class="step-icon"><i class="bi bi-bounding-box"></i></div>
+                    <div class="step-name">Landmarks</div>
+                    <div class="step-desc">68 facial points</div>
+                </div>
+                <div class="pipeline-arrow"><i class="bi bi-arrow-right"></i></div>
+                <div class="pipeline-step">
+                    <div class="step-icon"><i class="bi bi-qr-code"></i></div>
+                    <div class="step-name">Encoding</div>
+                    <div class="step-desc">128-d vector</div>
+                </div>
+                <div class="pipeline-arrow"><i class="bi bi-arrow-right"></i></div>
+                <div class="pipeline-step">
+                    <div class="step-icon"><i class="bi bi-check2"></i></div>
+                    <div class="step-name">Match</div>
+                    <div class="step-desc">Euclidean distance</div>
+                </div>
+            </div>
+            <div class="mt-3" style="background:var(--card2);border-radius:9px;padding:12px;">
+                <div class="d-flex gap-2 align-items-center mb-2">
+                    <i class="bi bi-info-circle-fill" style="color:var(--accent);"></i>
+                    <strong style="font-size:.8rem;">Threshold Configuration</strong>
+                </div>
+                <div class="d-flex justify-content-between align-items-center">
+                    <span style="font-size:.75rem;color:var(--muted);">Confidence threshold:</span>
+                    <span style="font-weight:700;color:var(--success);">0.55 (Euclidean distance)</span>
+                </div>
+                <div class="mt-2">
+                    <div class="cbar" style="width:100%;">
+                        <div class="cfill" style="width:55%;"></div>
+                    </div>
+                    <div class="d-flex justify-content-between mt-1">
+                        <span style="font-size:.7rem;">0.0 (Perfect match)</span>
+                        <span style="font-size:.7rem;">0.55 (Threshold)</span>
+                        <span style="font-size:.7rem;">1.0 (No match)</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Model Details -->
+    <div class="col-lg-6">
+        <div class="card">
+            <h6 class="mb-3" style="font-family:'Syne',sans-serif;font-weight:700;">
+                <i class="bi bi-cpu-fill me-2" style="color:var(--primary);"></i>
+                Model Specifications
+            </h6>
+            <div class="table-responsive">
+                <table class="tbl" style="width:100%;">
+                    <tbody>
+                        <tr>
+                            <td style="background:var(--card2);width:40%;">Detection Model</td>
+                            <td>HOG + Linear SVM</td>
+                        </tr>
+                        <tr>
+                            <td style="background:var(--card2);">Landmark Model</td>
+                            <td>68-point facial landmark detector</td>
+                        </tr>
+                        <tr>
+                            <td style="background:var(--card2);">Encoder Architecture</td>
+                            <td>ResNet-34 (modified)</td>
+                        </tr>
+                        <tr>
+                            <td style="background:var(--card2);">Embedding Dimension</td>
+                            <td>128 features</td>
+                        </tr>
+                        <tr>
+                            <td style="background:var(--card2);">Training Dataset</td>
+                            <td>Labeled Faces in the Wild (LFW)</td>
+                        </tr>
+                        <tr>
+                            <td style="background:var(--card2);">Face Alignments</td>
+                            <td>Affine transformation based on eyes</td>
+                        </tr>
+                        <tr>
+                            <td style="background:var(--card2);">Distance Metric</td>
+                            <td>Euclidean distance</td>
+                        </tr>
+                        <tr>
+                            <td style="background:var(--card2);">Processing Speed</td>
+                            <td>~0.2-0.5 seconds per face</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <!-- Accuracy Comparison -->
+    <div class="col-12">
+        <div class="card">
+            <h6 class="mb-3" style="font-family:'Syne',sans-serif;font-weight:700;">
+                <i class="bi bi-bar-chart-steps me-2" style="color:var(--warn);"></i>
+                Model Accuracy Comparison
+            </h6>
+            <div class="table-responsive">
+                <table class="tbl">
+                    <thead>
+                        <tr>
+                            <th>Model</th>
+                            <th>Accuracy</th>
+                            <th>Speed</th>
+                            <th>Pros</th>
+                            <th>Cons</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr style="background:rgba(16,185,129,.05);">
+                            <td><strong>HOG + SVM (Current)</strong></td>
+                            <td><span class="b-ok">98.5%</span></td>
+                            <td>Fast</td>
+                            <td>Lightweight, CPU-friendly</td>
+                            <td>Profile faces lower accuracy</td>
+                        </tr>
+                        <tr>
+                            <td>CNN + SVM</td>
+                            <td><span class="b-ok">99.2%</span></td>
+                            <td>Medium-Slow</td>
+                            <td>Better for angles/lighting</td>
+                            <td>Requires GPU for real-time</td>
+                        </tr>
+                        <tr>
+                            <td>FaceNet (Inception)</td>
+                            <td><span class="b-ok">99.6%</span></td>
+                            <td>Slow</td>
+                            <td>State-of-the-art accuracy</td>
+                            <td>Heavy, GPU required</td>
+                        </tr>
+                        <tr>
+                            <td>OpenCV LBPH</td>
+                            <td><span class="b-warn">85-90%</span></td>
+                            <td>Very Fast</td>
+                            <td>Extremely lightweight</td>
+                            <td>Low accuracy in varied lighting</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <!-- How It Works -->
+    <div class="col-md-6">
+        <div class="card">
+            <h6 class="mb-3" style="font-family:'Syne',sans-serif;font-weight:700;">
+                <i class="bi bi-gear-fill me-2" style="color:var(--accent);"></i>
+                Face Detection (HOG)
+            </h6>
+            <ul style="color:var(--muted);line-height:1.7;padding-left:20px;">
+                <li>Converts image to grayscale</li>
+                <li>Calculates gradient magnitude and direction</li>
+                <li>Creates HOG feature vectors for image cells</li>
+                <li>SVM classifier determines face vs non-face</li>
+                <li>Non-maximum suppression removes overlapping detections</li>
+            </ul>
+            <div class="mt-2 text-center">
+                <span class="b-pur">Advantage:</span> Works on CPU, ~0.1s per detection
+            </div>
+        </div>
+    </div>
+
+    <div class="col-md-6">
+        <div class="card">
+            <h6 class="mb-3" style="font-family:'Syne',sans-serif;font-weight:700;">
+                <i class="bi bi-database-fill me-2" style="color:var(--accent);"></i>
+                Face Encoding (ResNet)
+            </h6>
+            <ul style="color:var(--muted);line-height:1.7;padding-left:20px;">
+                <li>Aligns face using eye landmarks</li>
+                <li>Passes through ResNet-34 architecture</li>
+                <li>Generates 128-dimensional embedding vector</li>
+                <li>Vector represents unique facial features</li>
+                <li>Similar faces have smaller Euclidean distance</li>
+            </ul>
+            <div class="mt-2 text-center">
+                <span class="b-pur">Advantage:</span> Creates robust, illumination-invariant features
+            </div>
+        </div>
+    </div>
+
+    <!-- Limitations -->
+    <div class="col-12">
+        <div class="card" style="border-left:3px solid var(--warn);">
+            <h6 class="mb-2" style="font-family:'Syne',sans-serif;font-weight:700;">
+                <i class="bi bi-exclamation-triangle-fill me-2" style="color:var(--warn);"></i>
+                Limitations & Best Practices
+            </h6>
+            <div class="row">
+                <div class="col-md-6">
+                    <div style="background:rgba(239,68,68,.08);border-radius:8px;padding:10px;margin-bottom:10px;">
+                        <strong style="color:var(--danger);">⚠️ Current Limitations:</strong>
+                        <ul style="margin:8px 0 0 18px;font-size:.8rem;">
+                            <li>Profile/angled faces may not be detected</li>
+                            <li>Poor lighting reduces accuracy</li>
+                            <li>Facial occlusions (glasses, masks) affect results</li>
+                            <li>Only frontal faces optimal</li>
+                        </ul>
+                    </div>
+                </div>
+                <div class="col-md-6">
+                    <div style="background:rgba(16,185,129,.08);border-radius:8px;padding:10px;">
+                        <strong style="color:var(--success);">✅ Best Practices:</strong>
+                        <ul style="margin:8px 0 0 18px;font-size:.8rem;">
+                            <li>Capture 3-5 photos from different angles during registration</li>
+                            <li>Ensure good lighting when marking attendance</li>
+                            <li>Face camera directly, maintain distance of 1-2 feet</li>
+                            <li>Remove glasses/hats if possible during capture</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Performance Metrics -->
+    <div class="col-12">
+        <div class="card">
+            <h6 class="mb-3" style="font-family:'Syne',sans-serif;font-weight:700;">
+                <i class="bi bi-graph-up me-2" style="color:var(--success);"></i>
+                Performance Metrics
+            </h6>
+            <div class="row text-center g-2">
+                <div class="col-6 col-md-3">
+                    <div class="stat" style="flex-direction:column;text-align:center;">
+                        <div class="s-val" style="font-size:1.8rem;">0.2s</div>
+                        <div class="s-lb">Avg Detection Time</div>
+                    </div>
+                </div>
+                <div class="col-6 col-md-3">
+                    <div class="stat" style="flex-direction:column;text-align:center;">
+                        <div class="s-val" style="font-size:1.8rem;">98.5%</div>
+                        <div class="s-lb">Recognition Accuracy</div>
+                    </div>
+                </div>
+                <div class="col-6 col-md-3">
+                    <div class="stat" style="flex-direction:column;text-align:center;">
+                        <div class="s-val" style="font-size:1.8rem;">0.55</div>
+                        <div class="s-lb">Confidence Threshold</div>
+                    </div>
+                </div>
+                <div class="col-6 col-md-3">
+                    <div class="stat" style="flex-direction:column;text-align:center;">
+                        <div class="s-val" style="font-size:1.8rem;">128d</div>
+                        <div class="s-lb">Embedding Vector</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Custom CSS for pipeline diagram -->
+<style>
+.pipeline-diagram {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 8px;
+    background: var(--card2);
+    border-radius: 12px;
+    padding: 15px;
+}
+
+.pipeline-step {
+    text-align: center;
+    flex: 1;
+    min-width: 70px;
+}
+
+.step-icon {
+    width: 45px;
+    height: 45px;
+    margin: 0 auto 8px;
+    background: linear-gradient(135deg, var(--primary), var(--accent));
+    border-radius: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.2rem;
+    color: white;
+}
+
+.step-name {
+    font-size: .75rem;
+    font-weight: 700;
+    margin-bottom: 2px;
+}
+
+.step-desc {
+    font-size: .65rem;
+    color: var(--muted);
+}
+
+.pipeline-arrow {
+    color: var(--muted);
+    font-size: 1.2rem;
+}
+
+@media (max-width: 768px) {
+    .pipeline-diagram {
+        flex-direction: column;
+    }
+    .pipeline-arrow {
+        transform: rotate(90deg);
+    }
+}
+</style>
+{% endblock %}

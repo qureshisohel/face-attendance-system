@@ -1,0 +1,32 @@
+{% extends 'base.html' %}
+{% block title %}Faculty Attendance{% endblock %}
+{% block ptitle %}<i class="bi bi-calendar2-check-fill me-2" style="color:var(--accent);"></i>Faculty Attendance Records{% endblock %}
+{% block content %}
+<div class="card mb-3">
+  <form method="GET" class="row g-2 align-items-end">
+    <div class="col-6 col-md-3"><label class="fl">Date</label><input type="date" name="date" value="{{ date_f }}" class="fi"/></div>
+    <div class="col-6 col-md-2"><button type="submit" class="btn btn-p sm w-100 justify-content-center"><i class="bi bi-funnel-fill"></i> Filter</button></div>
+    <div class="col-6 col-md-1"><a href="{{ url_for('faculty_attendance') }}" class="btn btn-s sm w-100 justify-content-center"><i class="bi bi-x"></i></a></div>
+    <div class="col-6 col-md-auto"><a href="{{ url_for('download_csv',who='faculty') }}" class="btn btn-g sm"><i class="bi bi-download"></i> CSV</a></div>
+  </form>
+</div>
+<div class="card">
+  <div class="table-responsive">
+    <table class="tbl">
+      <thead><tr><th>#</th><th>Photo</th><th>Faculty</th><th class="hide-m">Emp ID</th><th>Dept</th><th>Status</th><th>Confidence</th><th>Time</th></tr></thead>
+      <tbody>{% for r in records %}
+      <tr>
+        <td style="color:var(--muted);">{{ loop.index }}</td>
+        <td><div class="av">{% if r.photo_path %}<img src="{{ url_for('static',filename=r.photo_path) }}" alt=""/>{% else %}<i class="bi bi-person-fill"></i>{% endif %}</div></td>
+        <td><strong>{{ r.title }} {{ r.name }}</strong></td>
+        <td class="hide-m"><span class="b-pur">{{ r.employee_id }}</span></td>
+        <td style="font-size:.8rem;">{{ r.dept }}</td>
+        <td><span class="b-ok">{{ r.status }}</span></td>
+        <td>{% if r.confidence %}<span style="color:var(--success);font-weight:700;">{{ "%.1f"|format(r.confidence) }}%</span>{% else %}—{% endif %}</td>
+        <td style="color:var(--muted);font-size:.76rem;white-space:nowrap;">{{ r.timestamp.strftime('%d %b %Y, %I:%M %p') }}</td>
+      </tr>
+      {% else %}<tr><td colspan="8" class="text-center" style="color:var(--muted);padding:28px;">No records found.</td></tr>{% endfor %}</tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

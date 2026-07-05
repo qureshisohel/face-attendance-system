@@ -1,0 +1,96 @@
+{% extends 'base.html' %}
+{% block title %}Edit Faculty{% endblock %}
+{% block ptitle %}<i class="bi bi-pencil-fill me-2" style="color:var(--accent);"></i>Edit Faculty — {{ f.title }} {{ f.name }}{% endblock %}
+{% block content %}
+<form method="POST">
+<div class="row g-3">
+  <div class="col-lg-6">
+    <div class="card">
+      <h6 class="mb-3" style="font-family:'Syne',sans-serif;font-weight:700;"><i class="bi bi-person-workspace me-2" style="color:var(--primary);"></i>Faculty Details</h6>
+
+      <div class="mb-3 text-center">
+        <div class="av-lg mx-auto mb-2">{% if f.photo_path %}<img src="{{ url_for('static',filename=f.photo_path) }}" alt=""/>{% else %}<i class="bi bi-person-fill"></i>{% endif %}</div>
+        <span style="font-size:.72rem;color:var(--muted);">Current Photo</span>
+      </div>
+
+      <div class="mb-2">
+        <label class="fl">Title *</label>
+        <select name="title" class="fi" required>
+          {% for t in ['Prof.','Dr.','Mr.','Mrs.','Ms.'] %}
+          <option value="{{ t }}" {% if f.title==t %}selected{% endif %}>{{ t }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="mb-2"><label class="fl">Full Name *</label><input type="text" name="name" class="fi" value="{{ f.name }}" required/></div>
+      <div class="mb-2"><label class="fl">Email *</label><input type="email" name="email" class="fi" value="{{ f.email }}" required/></div>
+      <div class="mb-2"><label class="fl">Phone *</label><input type="text" name="phone" class="fi" pattern="\d{10}" minlength="10" maxlength="10" title="Please enter exactly 10 digits" oninput="this.value = this.value.replace(/[^0-9]/g, '')" value="{{ f.phone or '' }}" required/></div>
+      <div class="mb-2">
+        <label class="fl">Department *</label>
+        <select name="dept" class="fi" required>
+          {% for d in depts %}<option value="{{ d.name }}" {% if d.name==f.dept %}selected{% endif %}>{{ d.name }}</option>{% endfor %}
+        </select>
+      </div>
+      <div class="mb-2">
+        <label class="fl">New Password <small style="color:var(--muted);">(blank = keep current)</small></label>
+        <input type="password" name="new_password" class="fi" placeholder="Enter new password to change"/>
+      </div>
+      <div class="mb-2">
+        <label class="fl">Status</label>
+        <select name="is_active" class="fi">
+          <option value="1" {% if f.is_active %}selected{% endif %}>Active</option>
+          <option value="0" {% if not f.is_active %}selected{% endif %}>Inactive / Suspended</option>
+        </select>
+      </div>
+    </div>
+  </div>
+
+  <div class="col-lg-6">
+    <div class="card">
+      <h6 class="mb-3" style="font-family:'Syne',sans-serif;font-weight:700;"><i class="bi bi-camera-fill me-2" style="color:var(--accent);"></i>Update Profile Photo</h6>
+      <div class="d-flex align-items-center gap-3 mb-3">
+        <div id="profPreview" style="width:64px;height:64px;border-radius:50%;background:var(--card2);border:2px dashed var(--border);display:flex;align-items:center;justify-content:center;overflow:hidden;flex-shrink:0;">
+          {% if f.photo_path %}<img src="{{ url_for('static',filename=f.photo_path) }}" style="width:100%;height:100%;object-fit:cover;border-radius:50%;"/>
+          {% else %}<i class="bi bi-person-fill" style="font-size:1.6rem;color:var(--muted);"></i>{% endif %}
+        </div>
+        <button type="button" onclick="openProfCam()" class="btn btn-s sm"><i class="bi bi-camera-fill"></i> New Photo</button>
+      </div>
+      <input type="hidden" name="profile_image" id="profImgInput"/>
+
+      <div style="background:var(--card2);border-radius:10px;padding:12px;margin-top:8px;">
+        <div style="font-size:.78rem;font-weight:700;margin-bottom:6px;"><i class="bi bi-info-circle me-1"></i>Faculty Info</div>
+        <div style="font-size:.75rem;color:var(--muted);">
+          <div>Employee ID: <strong style="color:var(--text);">{{ f.employee_id }}</strong></div>
+          <div>Registered: <strong style="color:var(--text);">{{ f.created_at.strftime('%d %b %Y') }}</strong></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="card mt-3 d-flex justify-content-between align-items-center flex-wrap gap-2">
+  <div style="color:var(--muted);font-size:.82rem;"><i class="bi bi-shield-check me-1"></i>Changes are saved immediately</div>
+  <div class="d-flex gap-2">
+    <a href="{{ url_for('admin_faculty') }}" class="btn btn-s sm"><i class="bi bi-x-lg"></i> Cancel</a>
+    <button type="submit" class="btn btn-p sm"><i class="bi bi-check2-circle"></i> Save Changes</button>
+  </div>
+</div>
+</form>
+
+<div id="profModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.82);z-index:9999;align-items:center;justify-content:center;padding:14px;">
+  <div style="background:var(--card);border-radius:15px;padding:17px;width:100%;max-width:360px;border:1px solid var(--border);">
+    <div class="d-flex justify-content-between mb-2"><strong style="font-size:.9rem;">New Profile Photo</strong>
+    <button onclick="closeProfCam()" style="background:none;border:none;color:var(--muted);font-size:1.2rem;cursor:pointer;"><i class="bi bi-x"></i></button></div>
+    <div class="cam-box mb-2"><video id="profVideo" autoplay muted playsinline></video><div class="cam-ov" id="profOv"><i class="bi bi-camera-video-off" style="font-size:2rem;opacity:.5;"></i></div></div>
+    <canvas id="profCanvas" style="display:none;"></canvas>
+    <button onclick="snapProf()" class="btn btn-p w-100 justify-content-center"><i class="bi bi-camera-fill"></i> Take Photo</button>
+  </div>
+</div>
+{% endblock %}
+{% block js %}
+<script>
+let ps=null;
+function openProfCam(){document.getElementById('profModal').style.display='flex';navigator.mediaDevices.getUserMedia({video:{facingMode:'user'},audio:false}).then(s=>{ps=s;document.getElementById('profVideo').srcObject=s;document.getElementById('profOv').style.display='none';}).catch(e=>alert('Camera: '+e.message));}
+function closeProfCam(){if(ps){ps.getTracks().forEach(t=>t.stop());ps=null;}document.getElementById('profModal').style.display='none';}
+function snapProf(){const v=document.getElementById('profVideo'),c=document.getElementById('profCanvas');c.width=v.videoWidth||640;c.height=v.videoHeight||480;c.getContext('2d').drawImage(v,0,0);const url=c.toDataURL('image/jpeg',.88);document.getElementById('profImgInput').value=url;document.getElementById('profPreview').innerHTML=`<img src="${url}" style="width:100%;height:100%;object-fit:cover;border-radius:50%;"/>`;closeProfCam();}
+</script>
+{% endblock %}

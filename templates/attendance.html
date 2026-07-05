@@ -1,0 +1,173 @@
+{% extends 'base.html' %}
+{% block title %}Attendance Records{% endblock %}
+{% block ptitle %}<i class="bi bi-calendar-check-fill me-2" style="color:var(--accent);"></i>
+  {% if session.role=='student' %}My Attendance{% else %}Student Attendance Records{% endif %}
+{% endblock %}
+{% block content %}
+
+<!-- Filters + Search -->
+<div class="card mb-3">
+  <form method="GET" class="row g-2 align-items-end">
+    <div class="col-6 col-md-2">
+      <label class="fl">Date</label>
+      <input type="date" name="date" value="{{ date_f }}" class="fi"/>
+    </div>
+    {% if session.role == 'admin' %}
+    <div class="col-6 col-md-2">
+      <label class="fl">Department</label>
+      <select name="dept" class="fi">
+        <option value="">All Depts</option>
+        {% for d in depts %}<option value="{{ d }}" {% if d==dept_f %}selected{% endif %}>{{ d }}</option>{% endfor %}
+      </select>
+    </div>
+    {% endif %}
+    {% if session.role in ['admin','faculty'] %}
+    <div class="col-6 col-md-1">
+      <label class="fl">Semester</label>
+      <select name="sem" class="fi">
+        <option value="">All</option>
+        {% for i in range(1,11) %}<option value="{{ i }}" {% if sem_f==i|string %}selected{% endif %}>Sem {{ i }}</option>{% endfor %}
+      </select>
+    </div>
+    {% endif %}
+    
+    <!-- ✅ NEW: Status Filter -->
+    <div class="col-6 col-md-2">
+      <label class="fl">Status</label>
+      <select name="status_filter" class="fi">
+        <option value="">All</option>
+        <option value="Present" {% if status_filter=='Present' %}selected{% endif %} style="color:#10b981;">✅ Present</option>
+        <option value="Absent" {% if status_filter=='Absent' %}selected{% endif %} style="color:#ef4444;">❌ Absent</option>
+      </select>
+    </div>
+    
+    <!-- ✅ NEW: Search Box -->
+    <div class="col-6 col-md-3">
+      <label class="fl">Search</label>
+      <input type="text" name="search" value="{{ search_f }}" class="fi" placeholder="Name, Roll No, Dept..."/>
+    </div>
+    
+    <div class="col-6 col-md-1">
+      <button type="submit" class="btn btn-p w-100 justify-content-center sm"><i class="bi bi-funnel-fill"></i> Filter</button>
+    </div>
+    <div class="col-6 col-md-1">
+      <a href="{{ url_for('attendance') }}" class="btn btn-s w-100 justify-content-center sm"><i class="bi bi-x"></i></a>
+    </div>
+    {% if session.role != 'student' %}
+    <div class="col-6 col-md-auto">
+      <a href="{{ url_for('download_csv',date=date_f,dept=dept_f,sem=sem_f,status_filter=status_filter,search=search_f) }}" class="btn btn-g sm">
+        <i class="bi bi-download"></i> CSV
+      </a>
+    </div>
+    {% endif %}
+  </form>
+</div>
+
+<!-- Mobile card view -->
+<div class="d-block d-md-none">
+  {% for r in records %}
+  <div class="card mb-2">
+    <div class="d-flex align-items-center gap-3">
+      {% if r.photo_path is defined %}
+      <div class="av">{% if r.photo_path %}<img src="{{ url_for('static',filename=r.photo_path) }}" alt=""/>{% else %}<i class="bi bi-person-fill"></i>{% endif %}</div>
+      <div style="flex:1;">
+        <div style="font-weight:700;">{{ r.name }}</div>
+        <div style="font-size:.74rem;color:var(--muted);">{{ r.roll_no }} · {{ r.dept }} · Sem {{ r.semester }}</div>
+        <div style="font-size:.72rem;color:var(--muted);">
+    {% if r.timestamp %}{{ r.timestamp.strftime('%d %b %Y, %I:%M %p') }}{% else %}Date not recorded{% endif %}
+</div>
+      </div>
+      {% else %}
+      <div style="flex:1;">
+        <div style="font-size:.78rem;color:var(--muted);">{{ r.timestamp.strftime('%d %b %Y, %I:%M %p') }}</div>
+      </div>
+      {% endif %}
+      <div class="text-end">
+        <!-- ✅ GREEN for Present, RED for Absent -->
+        <span class="status-badge {% if r.status == 'Present' %}status-present{% else %}status-absent{% endif %}">
+          {{ r.status }}
+        </span>
+        {% if r.confidence %}<div style="font-size:.74rem;color:var(--success);font-weight:700;margin-top:2px;">{{ "%.0f"|format(r.confidence) }}%</div>{% endif %}
+      </div>
+    </div>
+  </div>
+  {% else %}
+  <div class="card text-center" style="color:var(--muted);padding:36px;">No records found.</div>
+  {% endfor %}
+</div>
+
+<!-- Desktop table -->
+<div class="card d-none d-md-block">
+  <div class="d-flex justify-content-between mb-3 flex-wrap gap-2 align-items-center">
+    <span style="color:var(--muted);font-size:.82rem;">{{ records|length }} record(s)</span>
+    {% if session.role != 'student' %}
+    <a href="{{ url_for('download_csv',date=date_f,dept=dept_f,sem=sem_f,status_filter=status_filter,search=search_f) }}" class="btn btn-g sm">
+      <i class="bi bi-file-earmark-spreadsheet"></i> Download CSV
+    </a>
+    {% endif %}
+  </div>
+  <div class="table-responsive">
+    <table class="tbl">
+      <thead>
+        <tr>
+          <th>#</th>
+          {% if session.role!='student' %}<th>Photo</th><th>Name</th><th>Roll No</th><th>Dept</th><th>Sem</th>{% endif %}
+          <th>Status</th><th>Confidence</th><th>Date & Time</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in records %}
+        <tr>
+          <td style="color:var(--muted);">{{ loop.index }}</td>
+          {% if session.role!='student' %}
+          <td><div class="av">{% if r.photo_path %}<img src="{{ url_for('static',filename=r.photo_path) }}" alt=""/>{% else %}<i class="bi bi-person-fill"></i>{% endif %}</div></td>
+          <td><strong>{{ r.name }}</strong></td>
+          <td><span class="b-blue">{{ r.roll_no }}</span></td>
+          <td style="font-size:.8rem;">{{ r.dept }}</td>
+          <td><span class="b-warn">{{ r.semester }}</span></td>
+          {% endif %}
+          <!-- ✅ GREEN for Present, RED for Absent -->
+          <td>
+            <span class="status-badge {% if r.status == 'Present' %}status-present{% else %}status-absent{% endif %}">
+              {{ r.status }}
+            </span>
+          </td>
+          <td>
+            {% if r.confidence %}
+            <div style="min-width:65px;"><div class="cbar mb-1"><div class="cfill" style="width:{{ [r.confidence,100]|min }}%;"></div></div>
+            <span style="font-size:.74rem;color:var(--muted);">{{ "%.1f"|format(r.confidence) }}%</span></div>
+            {% else %}—{% endif %}
+          </td>
+          <td style="color:var(--muted);font-size:.78rem;white-space:nowrap;">{{ r.timestamp.strftime('%d %b %Y, %I:%M:%S %p') }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="9" class="text-center" style="color:var(--muted);padding:28px;">No records found.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<style>
+  .status-badge {
+    display: inline-block;
+    padding: 4px 10px;
+    border-radius: 20px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-align: center;
+    min-width: 70px;
+  }
+  .status-present {
+    background: rgba(16, 185, 129, 0.15);
+    color: #10b981;
+    border: 1px solid rgba(16, 185, 129, 0.3);
+  }
+  .status-absent {
+    background: rgba(239, 68, 68, 0.15);
+    color: #ef4444;
+    border: 1px solid rgba(239, 68, 68, 0.3);
+  }
+  
+</style>
+{% endblock %}

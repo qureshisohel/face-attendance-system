@@ -1,0 +1,31 @@
+{% extends 'base.html' %}
+{% block title %}Reset Password{% endblock %}
+{% block auth %}
+<div class="auth-pg">
+  <div class="auth-box">
+    <div class="auth-ico"><i class="bi bi-lock-fill text-white"></i></div>
+    <h1 class="auth-h">Reset Password</h1>
+    <p class="auth-s">Create a new password for <strong>{{ email }}</strong> ({{ role }})</p>
+
+    {% with msgs=get_flashed_messages(with_categories=true) %}{% if msgs %}
+      {% for cat,msg in msgs %}
+      <div class="alert alert-{{ cat }} py-2 mb-3" style="font-size:.82rem;border-radius:9px;">{{ msg }}</div>
+      {% endfor %}
+    {% endif %}{% endwith %}
+
+    <form method="POST">
+      <div class="mb-3">
+        <label class="fl"><i class="bi bi-lock me-1"></i>New Password</label>
+        <input type="password" name="password" class="fi" placeholder="Min 6 characters" required minlength="6"/>
+      </div>
+      <div class="mb-4">
+        <label class="fl"><i class="bi bi-lock-fill me-1"></i>Confirm Password</label>
+        <input type="password" name="confirm" class="fi" placeholder="Repeat new password" required minlength="6"/>
+      </div>
+      <button type="submit" class="btn btn-p w-100 justify-content-center" style="padding:11px;">
+        <i class="bi bi-check2-circle"></i> Reset Password
+      </button>
+    </form>
+  </div>
+</div>
+{% endblock %}

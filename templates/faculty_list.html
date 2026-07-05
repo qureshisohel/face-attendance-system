@@ -1,0 +1,37 @@
+{% extends 'base.html' %}
+{% block title %}Faculty{% endblock %}
+{% block ptitle %}<i class="bi bi-person-workspace me-2" style="color:var(--accent);"></i>Faculty{% endblock %}
+{% block content %}
+<div class="d-flex justify-content-between mb-3 flex-wrap gap-2">
+  <span style="color:var(--muted);font-size:.82rem;">{{ faculty|length }} faculty member(s)</span>
+  {% if session.role=='admin' %}<a href="{{ url_for('admin_add_faculty') }}" class="btn btn-p sm"><i class="bi bi-person-plus-fill"></i> Add Faculty</a>{% endif %}
+</div>
+<div class="card mb-2"><input class="fi" placeholder="🔍 Search…" oninput="filt(this.value)"/></div>
+<div class="card">
+  <div class="table-responsive">
+    <table class="tbl" id="facTbl">
+      <thead><tr><th>#</th><th>Photo</th><th>Name</th><th class="hide-m">Emp ID</th><th>Dept</th><th class="hide-m">Email</th><th>Status</th>{% if session.role=='admin' %}<th>Actions</th>{% endif %}</tr></thead>
+      <tbody>{% for f in faculty %}
+      <tr>
+        <td style="color:var(--muted);">{{ loop.index }}</td>
+        <td><div class="av">{% if f.photo_path %}<img src="{{ url_for('static',filename=f.photo_path) }}" alt=""/>{% else %}<i class="bi bi-person-fill"></i>{% endif %}</div></td>
+        <td><strong>{{ f.title }} {{ f.name }}</strong></td>
+        <td class="hide-m" style="font-size:.78rem;">{{ f.employee_id }}</td>
+        <td><span class="b-pur">{{ f.dept }}</span></td>
+        <td class="hide-m" style="color:var(--muted);font-size:.78rem;">{{ f.email }}</td>
+        <td>{% if f.is_active %}<span class="b-ok">Active</span>{% else %}<span class="b-no">Inactive</span>{% endif %}</td>
+        {% if session.role=='admin' %}
+        <td>
+          <a href="{{ url_for('admin_edit_faculty',fid=f.id) }}" class="btn btn-s xs"><i class="bi bi-pencil-fill"></i></a>
+          <form method="POST" action="{{ url_for('admin_delete_faculty',fid=f.id) }}" style="display:inline;" onsubmit="return confirm('Delete {{ f.title }} {{ f.name }}?')">
+            <button type="submit" class="btn btn-r xs"><i class="bi bi-trash3-fill"></i></button>
+          </form>
+        </td>
+        {% endif %}
+      </tr>
+      {% else %}<tr><td colspan="8" class="text-center" style="color:var(--muted);padding:28px;">No faculty found.</td></tr>{% endfor %}</tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}
+{% block js %}<script>function filt(q){q=q.toLowerCase();document.querySelectorAll('#facTbl tbody tr').forEach(r=>{r.style.display=r.textContent.toLowerCase().includes(q)?'':'none';});}</script>{% endblock %}

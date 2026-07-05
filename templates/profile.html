@@ -1,0 +1,81 @@
+{% extends 'base.html' %}
+{% block title %}Profile{% endblock %}
+{% block ptitle %}<i class="bi bi-person-circle me-2" style="color:var(--accent);"></i>My Profile{% endblock %}
+{% block content %}
+<div class="row g-3 justify-content-center">
+<div class="col-lg-7">
+  <div class="card mb-3 pcard">
+    <div class="av-lg">{% if user.photo_path %}<img src="{{ url_for('static',filename=user.photo_path) }}" alt=""/>{% else %}<i class="bi bi-person-fill"></i>{% endif %}</div>
+    <div>
+<h4 style="font-family:'Syne',sans-serif;font-weight:800;margin-bottom:3px;color:#ffffff;">        {{ (user.title+' ') if user.title is defined and user.title else '' }}{{ user.name }}
+      </h4>
+      <span class="sb-role r-{{ session.role }} mb-2 d-inline-block" style="font-size:.75rem;">{{ session.role|title }}</span>
+      <div style="color:var(--muted);font-size:.83rem;margin-top:6px;">
+        {% if user.roll_no is defined %}<div><i class="bi bi-card-text me-1"></i>{{ user.roll_no }}</div>{% endif %}
+        {% if user.employee_id is defined %}<div><i class="bi bi-badge-ad me-1"></i>{{ user.employee_id }}</div>{% endif %}
+        {% if user.dept %}<div><i class="bi bi-building me-1"></i>{{ user.dept }}</div>{% endif %}
+        <div><i class="bi bi-envelope me-1"></i>{{ user.email }}</div>
+        {% if user.semester is defined %}<div><i class="bi bi-book me-1"></i>Semester {{ user.semester }}</div>{% endif %}
+      </div>
+    </div>
+  </div>
+
+  {% if session.role != 'admin' %}
+  <div class="card">
+    <h6 class="mb-3" style="font-family:'Syne',sans-serif;font-weight:700;color:#ffffff;"><i class="bi bi-pencil-fill me-2" style="color:var(--accent);"></i>Edit Profile</h6>
+    <form method="POST">
+      <div class="row g-3">
+        <div class="col-md-6"><label class="fl">Full Name</label><input type="text" name="name" class="fi" value="{{ user.name }}" required/></div>
+        <div class="col-md-6"><label class="fl">Phone *</label><input type="text" name="phone" class="fi" pattern="\d{10}" minlength="10" maxlength="10" title="Please enter exactly 10 digits" oninput="this.value = this.value.replace(/[^0-9]/g, '')" value="{{ user.phone or '' }}" required/></div>
+        <div class="col-12">
+          <label class="fl"><i class="bi bi-camera me-1"></i>Update Photo</label>
+          <div class="d-flex align-items-center gap-3">
+            <div id="prev" style="width:56px;height:56px;border-radius:50%;background:var(--card2);border:2px dashed var(--border);display:flex;align-items:center;justify-content:center;overflow:hidden;flex-shrink:0;">
+              {% if user.photo_path %}<img src="{{ url_for('static',filename=user.photo_path) }}" style="width:100%;height:100%;object-fit:cover;border-radius:50%;"/>
+              {% else %}<i class="bi bi-person-fill" style="font-size:1.4rem;color:var(--muted);"></i>{% endif %}
+            </div>
+            <button type="button" onclick="openCam()" class="btn btn-s sm"><i class="bi bi-camera-fill"></i> Capture</button>
+          </div>
+          <input type="hidden" name="profile_image" id="profImg"/>
+        </div>
+      </div>
+      <div class="d-flex gap-2 mt-4 flex-wrap">
+        <button type="submit" class="btn btn-p"><i class="bi bi-check2-circle"></i> Save Changes</button>
+        <a href="{{ url_for('switch') }}" class="btn btn-s"><i class="bi bi-arrow-left-right"></i> Switch Account</a>
+        <a href="{{ url_for('logout') }}" class="btn btn-r"><i class="bi bi-box-arrow-right"></i> Logout</a>
+      </div>
+    </form>
+  </div>
+  {% else %}
+  <div class="card">
+    <div class="d-flex gap-2 flex-wrap">
+      <a href="{{ url_for('switch') }}" class="btn btn-s"><i class="bi bi-arrow-left-right"></i> Switch Account</a>
+      <a href="{{ url_for('logout') }}" class="btn btn-r"><i class="bi bi-box-arrow-right"></i> Logout</a>
+    </div>
+  </div>
+  {% endif %}
+</div>
+</div>
+
+<!-- Camera modal -->
+<div id="camModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.82);z-index:9999;align-items:center;justify-content:center;padding:14px;">
+  <div style="background:var(--card);border-radius:15px;padding:17px;width:100%;max-width:360px;border:1px solid var(--border);">
+    <div class="d-flex justify-content-between mb-2"><strong style="font-size:.9rem;">Take Photo</strong>
+    <button onclick="closeCam()" style="background:none;border:none;color:var(--muted);font-size:1.2rem;cursor:pointer;"><i class="bi bi-x"></i></button></div>
+    <div class="cam-box mb-2"><video id="pv" autoplay muted playsinline></video><div class="cam-ov" id="pov"><i class="bi bi-camera-video-off" style="font-size:2rem;opacity:.5;"></i></div></div>
+    <canvas id="pc" style="display:none;"></canvas>
+    <button onclick="snap()" class="btn btn-p w-100 justify-content-center"><i class="bi bi-camera-fill"></i> Take Photo</button>
+  </div>
+</div>
+{% endblock %}
+{% block js %}
+<script>
+let ps=null;
+function openCam(){
+  document.getElementById('camModal').style.display='flex';
+  navigator.mediaDevices.getUserMedia({video:{facingMode:'user'},audio:false}).then(s=>{ps=s;document.getElementById('pv').srcObject=s;document.getElementById('pov').style.display='none';}).catch(e=>alert('Camera error: '+e.message));
+}
+function closeCam(){if(ps){ps.getTracks().forEach(t=>t.stop());ps=null;}document.getElementById('camModal').style.display='none';}
+function snap(){const v=document.getElementById('pv'),c=document.getElementById('pc');c.width=v.videoWidth||640;c.height=v.videoHeight||480;c.getContext('2d').drawImage(v,0,0);const u=c.toDataURL('image/jpeg',.88);document.getElementById('profImg').value=u;document.getElementById('prev').innerHTML=`<img src="${u}" style="width:100%;height:100%;object-fit:cover;border-radius:50%;"/>`;closeCam();}
+</script>
+{% endblock %}
